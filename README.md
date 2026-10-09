@@ -8,6 +8,8 @@ The current implementation described here is **torr-arr-importer v1.0.3**.
 
 > **Repository publication note:** the documentation and example configuration files are published first. The v1.0.3 source archive has been reviewed from the project library, but the exact source file and installer have not yet been committed to this repository. Until those files are added, the clone-and-install command in the installation guide is not yet executable.
 
+> **Repository publication note:** the documentation and example configuration files are published first. The v1.0.3 source archive has been reviewed from the project library, but the exact source file and installer have not yet been committed to this repository. Until those files are added, the clone-and-install command in the installation guide is not yet executable.
+
 ## Why this exists
 
 Radarr and Sonarr are commonly configured for conventional downloading: a release is sent to a download client, the media is downloaded, and only then can it be imported into a library. That is a good model for a permanent local collection, but it is not always the desired experience.
