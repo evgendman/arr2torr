@@ -1,0 +1,18 @@
+# Copy to /etc/torr-arr-importer/sonarr-4k.toml and edit.
+# Never commit a file containing a real API key.
+name = "sonarr-4k"
+arr_type = "sonarr"
+arr_url = "http://127.0.0.1:8990"
+arr_api_key = "PUT_SONARR_4K_API_KEY_HERE"
+torrserver_url = "http://127.0.0.1:8092"
+category = "tv"
+target_quality = 2160
+state_db = "/var/lib/torr-arr-importer/state.db"
+history_page_size = 1000
+timeout = 30
+log_level = "INFO"
+log_file = "/var/log/torr-arr-importer/sonarr-4k.log"
+lock_file = ""
+retry_count = 2
+retry_delay = 1.0
+resolve_download_url = true
