@@ -12,17 +12,17 @@ The instructions below describe the v1.0.3 systemd deployment used on the Ubuntu
 
 No extra pip packages are required.
 
-## 1. Install the program and systemd units
+## 1. Publication status and installation assets
 
-From a local checkout of this repository:
+The v1.0.3 source archive and its installer have been reviewed from the project library, but the source file and installer are **not yet committed to this GitHub repository**. Therefore the following command is a target workflow, not an executable instruction yet:
 
     git clone https://github.com/evgendman/arr2torr.git
     cd arr2torr
     sudo ./install.sh
 
-The installer creates the system account torrimport if needed, installs the Python program under /opt/torr-arr-importer/, installs the systemd template service and timer, creates state/log directories and runs systemctl daemon-reload.
+The repository currently contains the systemd unit templates and configuration examples, plus the documentation. Before deploying from a fresh clone, the repository still needs `src/importer.py` and `install.sh` to be committed. Do not copy the service units into production without the matching importer program.
 
-The installer does not enable timers automatically. Configure and test an instance first.
+The intended installer creates the system account `torrimport` if needed, installs the Python program under `/opt/torr-arr-importer/`, installs the systemd template service and timer, creates state/log directories and runs `systemctl daemon-reload`. It does not enable timers automatically; configure and test an instance first.
 
 > API keys belong only in local files under /etc/torr-arr-importer/. Never commit a populated config to Git.
 
