@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.env
+*.log
+*.db
+*.db-shm
+*.db-wal
+config/*.toml
+!config/*.toml.example
