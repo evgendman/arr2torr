@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic Torr Arr Importer (%i)
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=5min
+AccuracySec=10s
+Persistent=true
+Unit=torr-arr-importer@%i.service
+
+[Install]
+WantedBy=timers.target
