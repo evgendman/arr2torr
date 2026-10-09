@@ -1,0 +1,20 @@
+[Unit]
+Description=Torr Arr Importer (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=torrimport
+Group=torrimport
+ExecStart=/opt/torr-arr-importer/importer.py --config /etc/torr-arr-importer/%i.toml
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/torr-arr-importer /var/log/torr-arr-importer
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
