@@ -67,9 +67,38 @@ Add tests for:
 - shared import history across instances;
 - normal mode versus rebuild;
 - TorrServer add responses with missing/mismatched hash;
+- asynchronous add behavior: HTTP success/expected hash followed by delayed metadata readiness, missing FileStats, disappearance from list, or `GotInfo` timeout;
+- post-add verification failure and retry without recording an unverified hash as successfully imported;
+- idempotent recovery from uncertain add outcomes without repeatedly adding a hash that is already present;
 - transient vs permanent HTTP status handling.
 
-### 6. Coordinate with the downstream STRM/NFO project
+### 6. Verify asynchronous TorrServer adds before recording successful imports
+
+**Status: planned reliability improvement; not yet implemented in v1.0.3.**
+
+**Reason**
+
+TorrServer's `POST /torrents` `action=add` response is not necessarily proof that the asynchronous metadata-acquisition step completed or that `save_to_db=true` reached its database-save path. The response can contain the expected hash before the server's background `GotInfo()` operation finishes. If metadata acquisition later times out, TorrServer may close the in-memory torrent without saving it, while the current importer has already written the hash to its shared SQLite import history. This can leave a false success marker that suppresses normal retries.
+
+**Work**
+
+- Treat the add response as an acknowledgement that the request was accepted, not as the final proof of a successful, persistent import.
+- After `action=add`, independently poll TorrServer using its supported list/get APIs for the exact normalized infohash. Require observable readiness evidence (prefer a usable, non-empty file list/FileStats or a trustworthy ready/working status), not merely an immediate echo of the requested hash.
+- Use a bounded verification window long enough to cover TorrServer's asynchronous metadata wait/disconnect timeout, with configurable polling intervals and an overall deadline. Log the phases distinctly: request accepted, waiting for readiness, verified, verification timed out, or transient API error.
+- Only add a hash to the terminal “successfully imported” SQLite history after the verification criteria pass. Keep uncertain attempts in a separate pending/retry state (or equivalent) so a later cycle can recover without treating them as completed and without issuing repeated add requests while the hash is already present.
+- If the hash never becomes ready or disappears before verification completes, do not mark it as successfully imported. Preserve the failure reason and make the operation safely retryable; check current TorrServer membership before every retry to avoid duplicates.
+- Keep the deliberate-removal safeguard: once an import has passed the defined confirmation criteria, a later absence must not silently trigger re-addition in normal mode. Recovery/rebuild remains explicit unless a separate, evidence-based policy can distinguish a server-side failure from a user removal.
+- Be precise about the guarantee. If TorrServer's API exposes no explicit database-commit acknowledgement, describe the result as “readiness/presence verified” rather than claiming an independently proven durable disk commit. If necessary, record a later post-settle presence check separately.
+- Add recorded API fixtures and tests for immediate success, delayed readiness, a correct hash returned before later timeout/disappearance, malformed/missing/mismatched hashes, transient API errors, retry after unverified failure, concurrent instances, and intentional user removal. Ensure an unverified attempt cannot suppress a subsequent eligible retry.
+
+**Exit criteria**
+
+- A successful add is not recorded as completed solely because the initial response contains the expected hash.
+- Delayed or failed asynchronous adds are visible in logs/state and remain safely recoverable without duplicate-add loops.
+- Ordinary retries remain idempotent; confirmed intentional removals are not resurrected.
+- Tests demonstrate both the successful readiness path and the “initial API acknowledgement, later metadata timeout” failure path.
+
+### 7. Coordinate with the downstream STRM/NFO project
 
 The importer already preserves provider IDs and selected Arr fields in TorrServer data, which supports a downstream library tree. The related torr2strm repository is currently private. When its public status and API are settled, document an end-to-end example showing Seerr request → Arr Grab → TorrServer → STRM/NFO library.
 
