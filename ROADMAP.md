@@ -69,6 +69,8 @@ Add tests for:
 - TorrServer add responses with missing/mismatched hash;
 - asynchronous add behavior: HTTP success/expected hash followed by delayed metadata readiness, missing FileStats, disappearance from list, or `GotInfo` timeout;
 - post-add verification failure and retry without recording an unverified hash as successfully imported;
+- multi-torrent batches where some hashes become ready immediately and others only after a delay, verifying shared polling and per-hash deadlines rather than serial full-timeout waits;
+- process/timer interruption while adds are pending, then recovery from persisted SQLite pending state;
 - idempotent recovery from uncertain add outcomes without repeatedly adding a hash that is already present;
 - transient vs permanent HTTP status handling.
 
@@ -84,8 +86,14 @@ TorrServer's `POST /torrents` `action=add` response is not necessarily proof tha
 
 - Treat the add response as an acknowledgement that the request was accepted, not as the final proof of a successful, persistent import.
 - After `action=add`, independently poll TorrServer using its supported list/get APIs for the exact normalized infohash. Require observable readiness evidence (prefer a usable, non-empty file list/FileStats or a trustworthy ready/working status), not merely an immediate echo of the requested hash.
-- Use a bounded verification window long enough to cover TorrServer's asynchronous metadata wait/disconnect timeout, with configurable polling intervals and an overall deadline. Log the phases distinctly: request accepted, waiting for readiness, verified, verification timed out, or transient API error.
-- Only add a hash to the terminal “successfully imported” SQLite history after the verification criteria pass. Keep uncertain attempts in a separate pending/retry state (or equivalent) so a later cycle can recover without treating them as completed and without issuing repeated add requests while the hash is already present.
+- Send all eligible candidates in the run without serially waiting for each torrent's full readiness timeout. Track each accepted add as its own pending operation, with its own deadline starting when that add request was submitted.
+- After the submission pass, enter a bounded verification/drain loop instead of exiting immediately. Poll the shared TorrServer `action=list` snapshot at a configurable short interval to check all pending hashes together; use `action=get` for individual details/FileStats only when needed. Mark fast-ready torrents verified immediately while slower torrents continue waiting.
+- Keep polling until every pending add reaches a terminal result or its individual deadline expires. Do not wait a full timeout *after* the last add and then perform only one check; readiness may happen at any time, so repeated checks detect it promptly. The overall run bound should account for the latest individual deadline without blocking indefinitely.
+- Make the verification timeout configurable and long enough to cover TorrServer's asynchronous metadata wait/disconnect timeout plus a safety margin where practical. Do not assume a hard-coded 90-second value is universally correct; document how the configured value relates to the installed TorrServer timeout.
+- Log the phases distinctly: request accepted, waiting for readiness, verified, verification timed out, or transient API error, with hash, elapsed time and observed status.
+- Only add a hash to the terminal “successfully imported” SQLite history after the verification criteria pass. Persist per-hash pending-operation state in SQLite (request time, source instance, verification deadline/last check, latest observed state and last error) so service/process restarts do not forget in-flight additions.
+- At the start of a run, reconcile persisted pending attempts against the current TorrServer inventory before issuing new add requests. If a pending hash is present but metadata is not ready yet, continue bounded observation instead of adding the same magnet again. If it is absent, only retry according to an explicit, bounded retry policy after re-checking the current inventory; do not create a tight retry loop.
+- Keep pending/uncertain state distinct from both terminal successful import history and the memory that suppresses resurrection of a deliberately removed, previously verified torrent. A timeout alone must not silently convert an unverified attempt into a successful import or permanently mark it as an intentional user removal.
 - If the hash never becomes ready or disappears before verification completes, do not mark it as successfully imported. Preserve the failure reason and make the operation safely retryable; check current TorrServer membership before every retry to avoid duplicates.
 - Keep the deliberate-removal safeguard: once an import has passed the defined confirmation criteria, a later absence must not silently trigger re-addition in normal mode. Recovery/rebuild remains explicit unless a separate, evidence-based policy can distinguish a server-side failure from a user removal.
 - Be precise about the guarantee. If TorrServer's API exposes no explicit database-commit acknowledgement, describe the result as “readiness/presence verified” rather than claiming an independently proven durable disk commit. If necessary, record a later post-settle presence check separately.
@@ -95,6 +103,8 @@ TorrServer's `POST /torrents` `action=add` response is not necessarily proof tha
 
 - A successful add is not recorded as completed solely because the initial response contains the expected hash.
 - Delayed or failed asynchronous adds are visible in logs/state and remain safely recoverable without duplicate-add loops.
+- A batch does not exit while it still has pending verification before the configured per-hash deadlines; fast successes are confirmed promptly, and one slow torrent does not force separate serial waits for every other torrent.
+- Pending additions survive importer restarts and are reconciled against TorrServer before any retry.
 - Ordinary retries remain idempotent; confirmed intentional removals are not resurrected.
 - Tests demonstrate both the successful readiness path and the “initial API acknowledgement, later metadata timeout” failure path.
 
