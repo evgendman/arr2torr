@@ -356,15 +356,34 @@ class StateDB:
         media: dict[str, Any],
         verification_timeout_sec: int,
     ) -> int:
-        """Persist intent before the add request; never store credential-bearing downloadUrl."""
+        """Atomically claim a hash and persist intent before the add request.
+
+        Returns zero if another run already owns an unresolved attempt or if a
+        retry is not due. A caller must not submit the add in that case.
+        """
         now_dt = datetime.now(timezone.utc)
         requested_at = now_dt.isoformat()
         deadline_at = (now_dt + timedelta(seconds=verification_timeout_sec)).isoformat()
-        with self.conn:
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
             existing = self.conn.execute(
-                "SELECT attempt_count FROM pending_adds WHERE hash = ?", (grab.hash,)
+                "SELECT attempt_count, status, next_retry_at FROM pending_adds WHERE hash = ?",
+                (grab.hash,),
             ).fetchone()
-            attempt_count = (int(existing["attempt_count"]) + 1) if existing else 1
+            if existing:
+                existing_status = str(existing["status"] or "")
+                if existing_status in {"pending", "failed"}:
+                    self.conn.commit()
+                    return 0
+                if existing_status == "retry_wait":
+                    due = parse_iso_datetime(existing["next_retry_at"])
+                    if due is None or due > now_dt:
+                        self.conn.commit()
+                        return 0
+                attempt_count = int(existing["attempt_count"]) + 1
+            else:
+                attempt_count = 1
+
             self.conn.execute(
                 """
                 INSERT INTO pending_adds
@@ -400,7 +419,11 @@ class StateDB:
                     requested_at, deadline_at, attempt_count,
                 ),
             )
-        return attempt_count
+            self.conn.commit()
+            return attempt_count
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def observe_pending(
         self,
@@ -912,6 +935,12 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
             attempt = db.begin_pending(
                 grab, cfg.name, media, cfg.verification_timeout_sec,
             )
+            if attempt == 0:
+                logging.info(
+                    "ADD_SKIPPED source=%s hash=%s reason=shared-pending-claim",
+                    cfg.name, grab.hash,
+                )
+                continue
             logging.info(
                 "ADD source=%s hash=%s title=%r imdb=%s tmdb=%s reason=%s attempt=%d",
                 cfg.name, grab.hash, grab.source_title, media.get("imdbId") or "",
@@ -1091,6 +1120,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--retry-failed", action="store_true", help="Re-queue exhausted, unverified add attempts for this instance")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Override configured log level")
     args = parser.parse_args(argv)
+    if args.dry_run and args.retry_failed:
+        parser.error("--retry-failed cannot be combined with --dry-run")
 
     try:
         cfg = config_from_file(args.config)
