@@ -119,7 +119,7 @@ For a normal run, define:
 
 Normal candidates are effectively:
 
-    Candidates = (A − T − I − P_blocked − P_due) ∪ P_due
+    Candidates = (A − T − I − P_blocked) ∪ P_due
 
 Equivalently, due retries are admitted only after the usual Arr-history, TorrServer-membership and successful-import checks, and no other pending claim may be overwritten. The initial HTTP add response does not update I; only a later observable readiness/database-presence check promotes a pending hash into successful import history.
 
