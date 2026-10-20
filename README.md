@@ -102,7 +102,7 @@ Each instance has its own TOML configuration, systemd service/timer instance, lo
 
     /var/lib/torr-arr-importer/state.db
 
-That shared history makes the instances cooperate instead of duplicating work. If the same infohash appears in different Arr histories, whichever instance sees it first can add it; the others see the hash in TorrServer and skip it.
+That shared history makes the instances cooperate instead of duplicating work. If the same infohash appears in different Arr histories, instances coordinate through the shared pending-add table as well as the TorrServer inventory, reducing duplicate requests even when per-instance timers overlap.
 
 The configured target_quality is stored as descriptive metadata from the source instance. It helps preserve which Arr lane selected the release, but it is **not** proof of the actual video resolution. A downstream STRM builder should inspect real stream metadata if the physical quality bucket must be accurate.
 
@@ -112,17 +112,18 @@ For a normal run, define:
 
 - **A** — distinct hashes in the source Arr's Grabbed history;
 - **T** — hashes currently present in TorrServer;
-- **I** — hashes in the shared persistent import history.
+- **I** — hashes in the successful import history.
+- **P** — unresolved, retry-waiting, or exhausted attempts in the shared pending_adds table.
+- **P_due** — pending retry-waiting attempts owned by this instance whose backoff has expired and whose attempt limit is not exhausted.
+- **P_blocked** — all other pending attempts that must not be re-sent yet.
 
-The normal candidate set is:
+Normal candidates are effectively:
 
-    Candidates = A − T − I
+    Candidates = (A − T − I − P_blocked − P_due) ∪ P_due
 
-The importer adds only hashes that have not already been imported, are not currently in TorrServer, and have not previously been recorded as imported.
+Equivalently, due retries are admitted only after the usual Arr-history, TorrServer-membership and successful-import checks, and no other pending claim may be overwritten. The initial HTTP add response does not update I; only a later observable readiness/database-presence check promotes a pending hash into successful import history.
 
-For an intentional resynchronization, --rebuild ignores **I**:
-
-    Rebuild candidates = A − T
+For an intentional historical resynchronization, --rebuild ignores **I** but still respects TorrServer membership and unresolved pending claims. A due, eligible pending retry remains subject to its attempt limit and backoff.
 
 This is useful after switching to a fresh TorrServer database or when deliberately restoring all Grabbed items still present in Arr history. It does not erase the SQLite database; it changes the filtering rule for that run.
 
