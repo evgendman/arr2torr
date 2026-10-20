@@ -1030,6 +1030,9 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                 deadline = pending_deadline(pending)
                 if deadline is not None and now >= deadline:
                     detail = poll_error or f"verification deadline expired; last observed status={status_text}"
+                    previous_error = str(pending.get("last_error") or "").strip()
+                    if previous_error and previous_error not in detail:
+                        detail = detail + "; previous_error=" + previous_error[:500]
                     state = db.fail_pending(
                         h, detail, cfg.max_add_attempts, cfg.retry_backoff_sec,
                     )
