@@ -355,6 +355,8 @@ class StateDB:
         source: str,
         media: dict[str, Any],
         verification_timeout_sec: int,
+        *,
+        allow_known: bool = False,
     ) -> int:
         """Atomically claim a hash and persist intent before the add request.
 
@@ -366,6 +368,13 @@ class StateDB:
         deadline_at = (now_dt + timedelta(seconds=verification_timeout_sec)).isoformat()
         self.conn.execute("BEGIN IMMEDIATE")
         try:
+            if not allow_known:
+                already_imported = self.conn.execute(
+                    "SELECT 1 FROM imports WHERE hash = ?", (grab.hash,)
+                ).fetchone()
+                if already_imported:
+                    self.conn.commit()
+                    return 0
             existing = self.conn.execute(
                 "SELECT attempt_count, status, next_retry_at FROM pending_adds WHERE hash = ?",
                 (grab.hash,),
@@ -934,6 +943,7 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
             )
             attempt = db.begin_pending(
                 grab, cfg.name, media, cfg.verification_timeout_sec,
+                allow_known=rebuild,
             )
             if attempt == 0:
                 logging.info(
