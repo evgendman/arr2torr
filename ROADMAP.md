@@ -115,6 +115,45 @@ TorrServer's `POST /torrents` `action=add` response is not necessarily proof tha
 
 The importer already preserves provider IDs and selected Arr fields in TorrServer data, which supports a downstream library tree. The related torr2strm repository is currently private. When its public status and API are settled, document an end-to-end example showing Seerr request → Arr Grab → TorrServer → STRM/NFO library.
 
+### 8. Live integration investigation: TorrServer metadata-acquisition timeouts (2026-10-20)
+
+**Status: reproduced on the live MINI-Ubuntu installation with importer v1.1.0; importer-side false-success behavior is fixed, but the underlying TorrServer/peer-discovery failure is not yet explained.**
+
+**Environment and preserved state**
+
+- Installed `torr-arr-importer 1.1.0` from commit `7831553da914b147d65989699b34a84c3ce238e5` on 2026-10-20.
+- Tested Radarr instance `radarr-1080` against TorrServer at `http://127.0.0.1:8092`.
+- TorrServer process reported MatriX.145 / torrent v1.2.31 and had been running since 2026-09-28 without a systemd restart (`NRestarts=0`).
+- The rebuild dry-run found 86 unique Grabbed hashes in Radarr history, 131 hashes in TorrServer, and 7 rebuild candidates. Rebuild was deliberately used; the shared importer DB was not cleared.
+- Diagnostic work stopped the `radarr-1080` and `sonarr-1080` timers. Before continuing, check their current state and inspect `pending_adds`; do not assume the timers were resumed.
+
+**Observed live results**
+
+- In the 2026-10-20 batch run, 6 add requests received the early TorrServer response `Torrent added`. Only `The Fall Guy (2024)`, hash `0c47eb46652cad3aea6d4b0281991a76f3f687e9`, was confirmed by usable `file-stats` in about 2 seconds; a later `action=list` showed `Torrent in db`.
+- Five accepted hashes did not appear in the list during the 120-second verification window: `All Good Things` (`c5c30def765f38a51d5f514c099bccc9ca6d076f`), `Barbie` (`363bc8e64331c3e09fda6ea2ca28e643db179802`), `The Ides of March` (`021b334963372019111c49a5f9983b6b8aeb3c65`), `Inside Out 2` (`b0296f9f778dc4b4888f70aec34d3474c02cd0a4`), and `Anyone But You` (`758573c09511366a6510cd36386a15e848eeac5c`). The TorrServer journal recorded five generic `timeout connection get torrent info` messages around 14:02:53-14:02:54, roughly 90 seconds after the add requests. Those generic lines do not identify their infohashes, so exact per-line attribution is not proven.
+- A single-hash retry of `Inside Out 2` (second attempt; no other add request in that run) was accepted at 14:14:51, followed by the TorrServer metadata timeout at 14:16:21. It remained absent from `action=list` after the importer’s 120-second deadline. Batch concurrency is therefore **not required** to reproduce the failure.
+- A later single-hash retry of `All Good Things` (second attempt) was accepted at 21:38:55 and produced another `timeout connection get torrent info` at 21:40:25; the importer again found the hash absent at the end of verification. The failure persisted after the stale ffprobe connections below were terminated.
+- `The Prestige` (hash `6c74712982b74c8525504db70828d6c74627de2d`) fails earlier with `HTTP 410 resolving download URL` at importer stage `prepare`. No TorrServer add request is sent for this hash. Treat it as a separate expired/unavailable Arr-history download URL issue; there is no evidence that this release or a Blu-ray-disc structure caused the TorrServer metadata timeouts.
+- TorrServer settings were observed as `DisableDHT=false`, `DisableTCP=false`, `DisableUTP=false`, `EnableIPv6=false`, `RetrackersMode=1`, `TorrentDisconnectTimeout=30`, `ConnectionsLimit=25`, `PeersListenPort=0` (automatic port selection). The process had TCP and UDP listeners on the dynamically selected port 37671. These observations do not by themselves prove that DHT/tracker/peer discovery succeeds end to end.
+- Two stale `ffprobe` processes (PIDs 1297713 and 1489423) had established localhost connections to port 8092. TorrServer-side sockets had about 4.14 MB each queued for send and showed `rwnd_limited:100%`; each peer was identified as `ffprobe`. Both processes were terminated with SIGTERM, and the established sockets disappeared. The later single-hash `All Good Things` retry still timed out, so cleaning these stuck clients was **not sufficient to fix** metadata acquisition. Their causal relationship to the torrent timeouts remains unproven.
+- Earlier generic TorrServer metadata-timeout messages also exist in logs from 2026-09-28 (previous process), 2026-10-04, 10-06, 10-15, 10-16, 10-18 and 10-19. This is not a problem introduced solely by importer v1.1.0.
+
+**Current conclusion**
+
+- v1.1.0 is correctly distinguishing request acceptance from a verified import: only a confirmed hash enters successful importer history; unconfirmed hashes remain in `pending_adds` with bounded retry state.
+- The failure occurs after TorrServer accepts a magnet, during its asynchronous metadata-acquisition path; the affected hash is later absent from the server list. A no-peer/unavailable-metadata condition, tracker/DHT/network reachability, or a TorrServer runtime issue remain possible. Available logs do not establish which is the root cause.
+- Do not attribute the failures to the `The Prestige` HTTP 410, Blu-ray parsing, batch parallelism, or stale ffprobe clients without further evidence. Increasing the importer verification timeout alone is not an evidenced fix: the TorrServer metadata operation is already logging its own timeout after roughly 90 seconds.
+
+**Next actions (continue in this order)**
+
+1. **Reconcile state before any more writes.** Confirm both importer timers are stopped, inspect all five `pending_adds` rows (status, `attempt_count`, `last_error`, `next_retry_at`) and check `action=list`. Manual test scripts changed retry times to isolate tests; verify actual DB state instead of assuming original scheduling. Preserve the backups under `/tmp/arr2torr-*`; do not delete/reset `state.db`.
+2. **Avoid another broad `--rebuild`.** It still scans all 86 distinct Radarr grabs and can submit every eligible absent hash. Use one controlled test hash at a time, with exact timestamps and a list check after the add.
+3. **Use a controlled known-good comparison.** Select one test torrent whose metadata/peer availability can be independently established (preferably a known well-seeded release), ensure no other importer cycle is running, submit it once, and record `add torrent`, any `Create cache`/`save to db`, the generic timeout time, and whether the same hash appears in `action=list`. The existing failure cases alone cannot distinguish an unavailable swarm from a server/network problem.
+4. If a known-good test also fails, plan one controlled TorrServer restart during a playback maintenance window, without changing its settings or deleting its config/database, and repeat the same single-hash test. Compare behavior before/after; do not restart during active playback without checking consumers.
+5. Check the runtime listener/UDP networking only if the controlled test remains failing. Do not randomly toggle DHT/TCP/UTP or increase timeouts without evidence.
+6. Handle `The Prestige` separately: the `HTTP 410` is a stale history download URL. Re-grab/refresh that release in Radarr if it is still wanted; no TorrServer retry can fix a URL that fails before the add call.
+7. After controlled testing, explicitly decide when to restore the timers. Once an attempt reaches the configured maximum (3), `--retry-failed` is a deliberate recovery action, not a routine diagnostic step.
+
 ## Explicitly not planned
 
 - A webhook listener: polling the Arr history is the selected design.
