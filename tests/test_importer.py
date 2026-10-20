@@ -239,5 +239,35 @@ class BatchVerificationTests(unittest.TestCase):
             db.close()
 
 
+    def test_acknowledged_or_uncertain_add_timeout_never_becomes_import_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab()
+
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(importer, "fetch_torrserver", side_effect=[[], []]),
+                mock.patch.object(importer, "fetch_media", return_value={"imdbId": "tt123"}),
+                mock.patch.object(
+                    importer, "add_to_torrserver",
+                    side_effect=importer.ImporterError("simulated uncertain add response"),
+                ),
+                mock.patch.object(
+                    importer, "pending_deadline",
+                    return_value=importer.datetime.now(importer.timezone.utc) - importer.timedelta(seconds=1),
+                ),
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 1)
+            db = importer.StateDB(cfg.state_db)
+            self.assertNotIn(HASH1, db.all_hashes())
+            pending = db.pending_rows()
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(pending[0]["status"], "retry_wait")
+            self.assertIn("simulated uncertain add response", pending[0]["last_error"])
+            db.close()
+
+
 if __name__ == "__main__":
     unittest.main()
