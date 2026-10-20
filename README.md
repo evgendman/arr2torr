@@ -4,7 +4,7 @@
 
 arr2torr is the project and documentation home for **torr-arr-importer**, a polling service that transfers releases selected with **Grab** in Radarr or Sonarr directly to the TorrServer API. It is intended for a media workflow where the user wants to start streaming from TorrServer, then expose those streams to a media library through STRM files or another integration.
 
-The current implementation described here is **torr-arr-importer v1.0.3**.
+The current implementation described here is **torr-arr-importer v1.1.0**.
 
 ## Why this exists
 
@@ -59,10 +59,25 @@ With the usual five-minute timer, a successfully grabbed release is normally tra
 - Reads the current TorrServer torrent list and compares hashes before adding anything.
 - Resolves the Arr history data.downloadUrl. In the tested Prowlarr setup, this URL redirects to the original magnet link.
 - Adds the torrent through TorrServer's /torrents API, including the Arr title, media category and a safe subset of Arr metadata in data.
-- Uses one shared SQLite database across all importer instances to remember hashes that were successfully imported.
-- Supports a non-mutating --dry-run and a deliberate --rebuild mode.
+- Uses one shared SQLite database across all importer instances for verified imports and restart-safe pending attempts.
+- Treats the TorrServer add response as an acknowledgement, then checks observable readiness or explicit database-presence evidence before recording success.
+- Submits candidates first and verifies the batch with one polling loop and per-hash deadlines rather than serially waiting for each add.
+- Retries unverified attempts with bounded exponential backoff and avoids resending hashes that are still pending on TorrServer.
+- Supports non-mutating --dry-run, deliberate --rebuild, and explicit --retry-failed for exhausted unverified attempts.
 - Uses separate per-instance configuration and lock files, while sharing the import-history database.
 - Redacts API-key-like URL parameters from logs and exceptions.
+
+## Asynchronous add verification (v1.1.0)
+
+TorrServer may acknowledge an add request before its background metadata acquisition completes. An expected hash in the initial response is therefore not treated as final success.
+
+The importer persists a pending attempt before the add request, submits eligible releases first, then polls the TorrServer list at a configurable interval. Every pending hash has its own deadline. Usable FileStats, a working status, or TorrServer's explicit database-presence status is used as observable verification evidence. The successful-import table is updated only after this evidence is observed.
+
+Pending attempts live in the shared SQLite table pending_adds and do not contain the credential-bearing download URL. After a process restart, they are reconciled against TorrServer before retrying. Failures use bounded exponential backoff and stop automatically after the configured attempt limit; --retry-failed explicitly re-queues exhausted, never-confirmed attempts for the selected Arr instance.
+
+Verification means observable readiness or database presence; it does not claim a durable disk-commit guarantee that TorrServer's API does not expose. Older successful-import records remain protected from automatic resurrection. Use --rebuild only when intentionally repopulating missing historical entries.
+
+Default verification settings are verification_timeout_sec = 120, verification_poll_interval_sec = 3.0, retry_backoff_sec = 60 (doubling per failed attempt, capped at one hour), and max_add_attempts = 3. Compare the timeout with the TorrentDisconnectTimeout setting of the installed TorrServer build.
 
 ## What it deliberately does not do
 
