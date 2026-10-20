@@ -435,7 +435,7 @@ class StateDB:
             self.conn.execute(
                 """
                 UPDATE pending_adds
-                SET last_checked_at = ?, last_status = ?, last_error = ?
+                SET last_checked_at = ?, last_status = ?, last_error = COALESCE(?, last_error)
                 WHERE hash = ? AND status = 'pending'
                 """,
                 (iso_now(), observed_status[:200], error[:1000] if error else None, torrent_hash),
