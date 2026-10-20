@@ -16,3 +16,7 @@ lock_file = ""
 retry_count = 2
 retry_delay = 1.0
 resolve_download_url = true
+verification_timeout_sec = 120
+verification_poll_interval_sec = 3.0
+retry_backoff_sec = 60
+max_add_attempts = 3
