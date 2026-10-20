@@ -1,5 +1,15 @@
 # Changelog
 
+## torr-arr-importer v1.1.0
+
+- Do not record a successful import solely because TorrServer returned HTTP success and the expected infohash.
+- Persist pending add attempts in shared SQLite before the side-effecting request and reconcile them after process/timer restarts.
+- Submit eligible releases first, then verify all pending hashes with a shared polling loop and individual deadlines.
+- Confirm observable readiness through usable FileStats, working status, or explicit TorrServer database-presence status.
+- Add bounded exponential retry backoff, configurable attempt limits, and --retry-failed for explicit re-queueing of exhausted, never-confirmed attempts.
+- Keep unverified attempts separate from confirmed import history and preserve intentional-removal suppression behavior.
+- Add regression coverage for readiness evidence, pending/success transitions, retry limits, batch polling, restart recovery, and shared pending claims.
+
 ## torr-arr-importer v1.0.3
 
 - Clarified the history summary counters: unique_hashes and duplicates replace the ambiguous valid count.
