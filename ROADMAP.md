@@ -30,7 +30,7 @@ This document records the current **torr-arr-importer v1.1.0** implementation se
 - **Sonarr history path:** records parse and duplicate hashes are recognized correctly; a dry-run with a hash already in TorrServer produced no candidate.
 
 The last item is not the same as a complete live test of a **new** Sonarr Grab flowing into an initially missing TorrServer hash. That end-to-end case remains to be verified.
-- **Automation:** GitHub Actions compiles the importer and runs the unittest suite on Python 3.11 and 3.12; both matrix jobs passed for v1.1.0.
+- **Automation:** GitHub Actions compiles the importer and runs 12 unit tests on Python 3.11 and 3.12; both matrix jobs passed for v1.1.0.
 
 ## Planned improvements
 
@@ -71,7 +71,7 @@ Add tests for:
 - normal mode versus rebuild;
 - TorrServer add responses with missing/mismatched hash;
 - asynchronous add behavior: HTTP success/expected hash followed by delayed metadata readiness, missing FileStats, disappearance from list, or `GotInfo` timeout;
-- post-add verification failure and retry without recording an unverified hash as successfully imported;
+- [x] post-add verification timeout leaves the hash out of successful import history and records a bounded retry state;
 - [x] multi-torrent batches where one hash becomes ready immediately and another after a later poll, verifying shared polling rather than serial full-timeout waits;
 - [x] restart recovery from a persisted SQLite pending attempt without resending a hash already present and ready;
 - [x] concurrent pending-claim guard and retry-limit/backoff transitions;
