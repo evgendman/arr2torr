@@ -78,6 +78,26 @@ Use the HISTORY and SNAPSHOT log lines first.
 | FAILED | The candidate reached the add attempt but failed. Read the sanitized error and check API reachability, authorization and the TorrServer response. |
 | candidates=0 | No eligible new hashes were found under the current filtering rule. It is not in itself an error. |
 
+## Asynchronous add verification (v1.1.0)
+
+An ADD_ACCEPTED log entry means TorrServer acknowledged the add request; it is not a completed import. ADDED is logged only after the importer observes readiness or explicit database-presence evidence for the exact hash.
+
+The importer submits eligible candidates first, then polls one shared TorrServer action=list snapshot at a configurable interval. Each attempt has its own deadline measured from the add request. Defaults are a 120-second verification deadline and a 3-second polling interval. Compare the deadline with TorrentDisconnectTimeout in the installed TorrServer build.
+
+The shared state database contains:
+- imports: confirmed import history and the existing intentional-removal safeguard;
+- pending_adds: in-flight, retry-waiting, or exhausted attempts. This table stores safe descriptive fields but not the original download URL or any API key.
+
+After restart, pending attempts are checked against TorrServer before another request is sent. A present but not-yet-ready hash stays pending until the verification deadline. Confirmed attempts are atomically promoted into imports. Expired attempts use exponential backoff, capped at one hour; the default maximum is three add attempts. After that limit the attempt is left in failed state and normal polling does not automatically resend it.
+
+To explicitly re-queue exhausted unverified attempts for one source instance, run:
+
+    sudo -u torrimport /opt/torr-arr-importer/importer.py --config /etc/torr-arr-importer/radarr-1080.toml --retry-failed
+
+Do not combine --retry-failed with --dry-run. This option re-queues only failed unverified attempts for the selected instance; it does not clear successful import history or automatically restore confirmed user-removed torrents. Use --rebuild only for intentional historical repopulation.
+
+Verification means observable readiness (usable FileStats or working status) or explicit TorrServer database presence. It does not claim a durable disk-commit acknowledgement that TorrServer does not expose.
+
 ## API and authentication errors
 
 - Arr API calls use X-Api-Key; check that each config contains the key for the correct Arr instance.
