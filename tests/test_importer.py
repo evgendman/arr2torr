@@ -135,6 +135,15 @@ class PendingStateTests(unittest.TestCase):
             self.assertEqual(len(db.pending_rows()), 1)
             db.close()
 
+    def test_verified_import_cannot_be_claimed_again_from_a_stale_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = importer.StateDB(str(Path(tmp) / "state.db"))
+            grab = make_grab()
+            db.add(grab, "radarr-1080", {"imdbId": "tt123"})
+            self.assertEqual(db.begin_pending(grab, "radarr-1080", {}, 120), 0)
+            self.assertEqual(db.pending_rows(), [])
+            db.close()
+
     def test_failed_attempt_uses_backoff_and_attempt_limit(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = importer.StateDB(str(Path(tmp) / "state.db"))
