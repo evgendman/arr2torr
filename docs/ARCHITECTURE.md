@@ -1,6 +1,6 @@
 # Architecture and state model
 
-This document describes the current **torr-arr-importer v1.1.0** behavior and data mapping. The existing TorrServer metadata payload retains the core field subset introduced in v1.0.3; v1.1.0 adds asynchronous add verification, persistent pending attempts and bounded retries.
+This document describes the current **torr-arr-importer v1.2.0** behavior and data mapping. The existing TorrServer metadata payload retains the core field subset introduced in v1.0.3; v1.1.0 added asynchronous add verification and bounded retries, and v1.2.0 adds aggregated Apprise notifications.
 
 ## 1. Source of truth
 
@@ -173,7 +173,22 @@ target_quality is descriptive configuration data. It represents which Arr lane c
 - Failed candidate additions are logged with the hash and a sanitized error; successful additions are recorded in SQLite only after TorrServer confirms the expected hash.
 - --dry-run prints candidate decisions and media identifiers but does not add torrents or record successful imports.
 
-## 10. Component boundaries
+## 10. Notification state and failure summaries
+
+Notification delivery is an auxiliary side effect and does not change import, retry or exit semantics. Configured instances send POST JSON to `<apprise_url>/notify/<config_key>`; routing is selected by the `critical` or `warnings` tag, with Apprise type `failure` or `warning`. The importer never stores Telegram credentials.
+
+The existing SQLite database is extended in place:
+- `pending_adds.media_title` stores the Arr media title separately from the selected release title in `pending_adds.title`.
+- `pending_adds.title_slug` stores the Arr-provided slug used for an optional browser-facing card URL.
+- `pending_adds.notification_attempted_at` makes final alerts one-shot; failures already in `failed` before the v1.2.0 migration are baselined to avoid historical notification floods.
+- `notification_state` stores a per-instance fingerprint of the retry-wait count and attempt-number distribution. Names and identities are intentionally excluded from this fingerprint and interim message.
+- `terminal_events` deduplicates permanent errors that occur before an add can be created, such as an expired Arr history download URL (HTTP 410).
+
+The optional `arr_ui_url` is a browser-facing base URL, separate from `arr_url` (the API base). A link is built from the media `titleSlug` and the instance type (`/movie/<slug>` for Radarr or `/series/<slug>` for Sonarr); if either value is unavailable, the alert omits the link. Verify the configured base URL is reachable from the receiving Telegram client.
+
+The Apprise request uses a bounded timeout and no retry loop. Delivery failures are written to the local service log only; the importer does not recursively notify about notification failures. A terminal alert is marked attempted after one delivery attempt, avoiding repeated alerts on every timer cycle.
+
+## 11. Component boundaries
 
     Seerr -> Radarr/Sonarr -> Prowlarr / indexer
                      |
