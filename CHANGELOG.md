@@ -1,5 +1,13 @@
 # Changelog
 
+## torr-arr-importer v1.2.0
+
+- Add opt-in Apprise API notifications using the shared `arr-stack` configuration and tag-based routing; no direct Telegram credentials are stored by the importer.
+- Send numeric-only, aggregated warnings when the retry-wait count/attempt distribution changes; suppress unchanged messages across timer runs.
+- Send one grouped critical notification for newly terminal add/verification failures and permanent HTTP 4xx preparation failures, with human-readable media/release titles, concise sanitized causes, and optional Arr UI links.
+- Persist notification state in the existing SQLite database; suppress historical failed rows during migration, avoid endless delivery retries, and keep notification outages from affecting imports.
+- Add tests for aggregation, deduplication, terminal-failure details, link generation, redaction, and unavailable/disabled Apprise.
+
 ## torr-arr-importer v1.1.0
 
 - Do not record a successful import solely because TorrServer returned HTTP success and the expected infohash.
