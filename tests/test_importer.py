@@ -281,6 +281,82 @@ class BatchVerificationTests(unittest.TestCase):
 
 
 
+class StateMigrationTests(unittest.TestCase):
+    def test_v11_database_migrates_in_place_and_baselines_old_failed_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_path = root / "state.db"
+            conn = importer.sqlite3.connect(str(db_path))
+            conn.executescript(
+                """
+                CREATE TABLE imports (
+                    hash TEXT PRIMARY KEY,
+                    imported_at TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    arr_history_id INTEGER,
+                    arr_media_id INTEGER,
+                    download_id TEXT,
+                    title TEXT,
+                    imdb_id TEXT,
+                    tmdb_id TEXT,
+                    tvdb_id TEXT
+                );
+                CREATE INDEX idx_imports_source ON imports(source);
+                CREATE TABLE pending_adds (
+                    hash TEXT PRIMARY KEY,
+                    source TEXT NOT NULL,
+                    arr_history_id INTEGER,
+                    arr_media_id INTEGER,
+                    download_id TEXT,
+                    title TEXT,
+                    imdb_id TEXT,
+                    tmdb_id TEXT,
+                    tvdb_id TEXT,
+                    requested_at TEXT NOT NULL,
+                    deadline_at TEXT NOT NULL,
+                    attempt_count INTEGER NOT NULL DEFAULT 1,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    last_checked_at TEXT,
+                    last_status TEXT,
+                    last_error TEXT,
+                    next_retry_at TEXT
+                );
+                CREATE INDEX idx_pending_source_status ON pending_adds(source, status);
+                INSERT INTO pending_adds
+                  (hash, source, title, requested_at, deadline_at, attempt_count, status, last_error)
+                VALUES
+                  ('c5c30def765f38a51d5f514c099bccc9ca6d076f',
+                   'radarr-1080', 'Old.Release.1080p',
+                   '2026-10-20T12:00:00+00:00', '2026-10-20T12:02:00+00:00',
+                   3, 'failed', 'old terminal failure');
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            db = importer.StateDB(str(db_path))
+            row = db.pending_rows("radarr-1080")[0]
+            self.assertEqual(row["title"], "Old.Release.1080p")
+            self.assertEqual(row["status"], "failed")
+            self.assertEqual(row["attempt_count"], 3)
+            self.assertIsNotNone(row["notification_attempted_at"])
+            self.assertIn("media_title", {
+                item["name"] for item in db.conn.execute("PRAGMA table_info(pending_adds)")
+            })
+            self.assertEqual(db.unnotified_terminal_failures("radarr-1080"), [])
+            self.assertIsNotNone(
+                db.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='notification_state'"
+                ).fetchone()
+            )
+            self.assertIsNotNone(
+                db.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='terminal_events'"
+                ).fetchone()
+            )
+            db.close()
+
+
 class NotificationTests(unittest.TestCase):
     def make_notification_config(self, root):
         return importer.replace(
