@@ -367,6 +367,7 @@ class StateDB:
             );
             CREATE INDEX IF NOT EXISTS idx_terminal_events_source
                 ON terminal_events(source, notification_attempted_at);
+            """
         )
         columns = {
             str(row["name"])
