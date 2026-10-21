@@ -885,8 +885,9 @@ def dispatch_notifications(cfg: Config, db: StateDB) -> None:
             cfg, f"{cfg.service_name} — Проблемы передачи (ожидается повтор)",
             body, "warning", cfg.notification_tag_warning,
         )
-    # Update the fingerprint regardless of delivery success, avoiding endless retries.
-    db.set_notification_fingerprint(state_key, fingerprint)
+    # Update after every enabled run even when delivery fails. While disabled, keep
+    # an empty baseline so enabling notifications later can report an ongoing issue.
+    db.set_notification_fingerprint(state_key, fingerprint if cfg.notifications_enabled else "")
 
     failed_rows = db.unnotified_terminal_failures(cfg.name)
     terminal_events = db.unnotified_terminal_events(cfg.name)
