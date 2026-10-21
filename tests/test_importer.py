@@ -354,6 +354,16 @@ class NotificationTests(unittest.TestCase):
                 db.fail_pending(HASH1, "verification deadline expired; metadata timeout", 1, 1),
                 "failed",
             )
+            second = make_grab(HASH2, 2, "Inside.Out.2.2024.1080p.WEB-DL")
+            db.begin_pending(
+                second, cfg.name,
+                {"title": "Inside Out 2", "titleSlug": "inside-out-2-2024"},
+                120,
+            )
+            self.assertEqual(
+                db.fail_pending(HASH2, "verification deadline expired; metadata timeout", 1, 1),
+                "failed",
+            )
             sent = []
             with mock.patch.object(importer, "urlopen", side_effect=self.fake_apprise(sent)):
                 importer.dispatch_notifications(cfg, db)
@@ -364,10 +374,13 @@ class NotificationTests(unittest.TestCase):
             payload = sent[0]["payload"]
             self.assertEqual(payload["tag"], "critical")
             self.assertEqual(payload["type"], "failure")
+            self.assertIn("Терминальных ошибок в этой сводке: 2", payload["body"])
             self.assertIn("All Good Things", payload["body"])
             self.assertIn("All.Good.Things.2010.1080p.WEB-DL", payload["body"])
             self.assertIn("http://192.168.0.14:7878/movie/all-good-things-2010-603", payload["body"])
+            self.assertIn("Inside Out 2", payload["body"])
             self.assertNotIn(HASH1, payload["body"])
+            self.assertNotIn(HASH2, payload["body"])
             self.assertEqual(len(db.unnotified_terminal_failures(cfg.name)), 0)
             db.close()
 
@@ -430,6 +443,16 @@ class NotificationTests(unittest.TestCase):
             with mock.patch.object(importer, "urlopen") as send:
                 importer.dispatch_notifications(cfg, db)
                 send.assert_not_called()
+            # Disabled means no delivery attempt; the new failure remains queued
+            # for a later run after notifications are enabled.
+            self.assertEqual(len(db.unnotified_terminal_failures(cfg.name)), 1)
+
+            enabled = self.make_notification_config(Path(tmp))
+            sent = []
+            with mock.patch.object(importer, "urlopen", side_effect=self.fake_apprise(sent)):
+                importer.dispatch_notifications(enabled, db)
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(sent[0]["payload"]["tag"], "critical")
             self.assertEqual(db.unnotified_terminal_failures(cfg.name), [])
             db.close()
 
