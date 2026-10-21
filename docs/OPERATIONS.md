@@ -106,6 +106,22 @@ Verification means observable readiness (usable FileStats or working status) or 
 - A Prowlarr download URL may contain an API key in its query string. The importer redacts common API-key query parameters in logs and does not save the original downloadUrl into TorrServer metadata.
 - HTTP 401/403 and other permanent 4xx failures are not retried repeatedly. HTTP 408, 429, 5xx and transient network failures are retryable.
 
+## Apprise notifications (v1.2.0)
+
+The importer sends only aggregated events through the shared Apprise API:
+
+- `warnings` / `warning`: an updated numeric snapshot of attempts currently waiting for automatic retry. No title, release name, hash or media ID is included. Unchanged snapshots are suppressed across timer cycles.
+- `critical` / `failure`: a grouped summary of newly terminal add/verification failures and permanent non-retryable HTTP 4xx preparation failures. It includes the human-readable title, release title when available, a short sanitized cause, add/verification attempts, and a best-effort Arr card link if `arr_ui_url` and `titleSlug` are available.
+
+The shared `state.db` now also stores notification fingerprints and one-time terminal alert markers. Do not remove/reset it to troubleshoot notifications; doing so also erases importer history and deliberate-removal memory. Terminal alerts are marked attempted after one send attempt, even if Apprise is offline, so delivery failure does not create an endless alert loop.
+
+Check local logs for delivery diagnostics:
+
+    journalctl -u torr-arr-importer@radarr-1080.service -n 150 --no-pager
+    grep -E 'APPRISE_(SENT|FAILED|SKIPPED)' /var/log/torr-arr-importer/radarr-1080.log
+
+A valid configuration is opt-in and contains `notifications_enabled = true`, `apprise_url`, `apprise_config_key = "arr-stack"`, a stable `service_name`, a short timeout and the `critical`/`warnings` tags. Telegram credentials and topic IDs belong only in Apprise. If notification delivery fails, main import/retry state is still authoritative.
+
 ## Timers and overlapping runs
 
 Every instance has an independent systemd timer and lock file. The default interval is five minutes. If the four instances are enabled together, their default timer settings may align; use per-instance timer overrides or enable them at staggered times to distribute API load.
@@ -121,4 +137,4 @@ A lock conflict indicates a run of the same configured instance is already activ
 
 This service transfers the selected release and the safe metadata subset into TorrServer. It does not resolve a bad indexer result, configure Arr Quality Profiles or Custom Formats, manufacture missing IDs, generate NFO, or materialize the STRM tree. Those belong to the indexer/Arr configuration and downstream library-generation stages.
 
-For the current v1.0.3 field mapping and known gaps, see [Architecture](ARCHITECTURE.md) and [Roadmap](../ROADMAP.md).
+For the current field mapping and known gaps, see [Architecture](ARCHITECTURE.md) and [Roadmap](../ROADMAP.md).
