@@ -30,7 +30,7 @@ This document records the current **torr-arr-importer v1.2.0** implementation se
 - **Sonarr history path:** records parse and duplicate hashes are recognized correctly; a dry-run with a hash already in TorrServer produced no candidate.
 
 The last item is not the same as a complete live test of a **new** Sonarr Grab flowing into an initially missing TorrServer hash. That end-to-end case remains to be verified.
-- **Automation:** GitHub Actions compiles the importer and runs 12 unit tests on Python 3.11 and 3.12; both matrix jobs passed for v1.1.0.
+- **Automation:** v1.1.0 had 12 unit tests. For v1.2.0, GitHub Actions passed both Python 3.11 and 3.12 matrix jobs with 18 unit tests at source commit `abab4989c28181611c667e63b499efa124da870c`; this covers compilation, warning aggregation/deduplication, terminal summaries, redaction and non-fatal Apprise failures.
 
 ## Deployment baseline and working version (2026-10-21)
 
@@ -122,7 +122,7 @@ Implemented behavior:
 - In-place SQLite column migration; pre-existing `failed` rows are baselined to avoid a flood of stale notifications after upgrade.
 - Four configuration examples default to notifications disabled. The intended MINI-Ubuntu deployment will enable only `radarr-1080` and `sonarr-1080`, matching the last observed live timer state; 4K timers stay disabled.
 
-The GitHub Actions workflow compiles the source and runs unit tests on Python 3.11 and 3.12. The result for the final v1.2.0 source/test commit is to be recorded here after it completes. Live deployment verification is separate from CI and must not be claimed before the on-host commands have been run.
+The GitHub Actions workflow passed on both Python 3.11 and 3.12 with 18 unit tests for source commit `abab4989c28181611c667e63b499efa124da870c`. Live deployment verification remains separate from CI and has not yet been performed on MINI-Ubuntu.
 
 ## Planned improvements
 
