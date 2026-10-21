@@ -904,14 +904,16 @@ def dispatch_notifications(cfg: Config, db: StateDB) -> None:
                 cfg, f"{cfg.service_name} — Ошибка передачи в TorrServer{suffix}",
                 body, "failure", cfg.notification_tag_critical,
             )
+        # Mark after at most one delivery attempt, including HTTP failure; do not
+        # retry terminal messages indefinitely. Disabled notifications are not an
+        # attempt: leave new events pending so turning notifications on can deliver them.
+        db.mark_pending_notifications_attempted([str(row["hash"]) for row in failed_rows])
+        db.mark_terminal_events_attempted([str(row["event_key"]) for row in terminal_events])
     else:
         logging.info(
             "APPRISE_SKIPPED source=%s reason=notifications-disabled terminal_items=%d",
             cfg.name, len(blocks),
         )
-    # Mark each terminal item after at most one delivery attempt; do not retry indefinitely.
-    db.mark_pending_notifications_attempted([str(row["hash"]) for row in failed_rows])
-    db.mark_terminal_events_attempted([str(row["event_key"]) for row in terminal_events])
 
 
 def as_int(value: Any) -> int | None:
