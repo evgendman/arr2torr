@@ -1,6 +1,6 @@
 # Installation and configuration
 
-The instructions below describe the v1.1.0 systemd deployment used on the Ubuntu media server. The four-instance examples are intended to be adapted to the actual addresses, ports and API keys in your installation.
+The instructions below describe the v1.2.0 systemd deployment used on the Ubuntu media server. The four-instance examples are intended to be adapted to the actual addresses, ports and API keys in your installation.
 
 ## Requirements
 
@@ -84,6 +84,30 @@ For other instances, use the matching config/*.toml.example file.
 - An empty log_file sends logs to the system journal only.
 
 For the second Radarr/Sonarr profile, replace the base URL, API key, name, category and target-quality value with those belonging to that instance.
+
+## Optional Apprise notifications (v1.2.0)
+
+Notifications are disabled by default and use the shared Apprise API, not a direct Telegram connection. Add the following flat TOML keys to each instance that should notify. Replace placeholders with values reachable from the Telegram client; do not add a bot token, chat ID or topic ID here.
+
+    notifications_enabled = true
+    apprise_url = "http://<MINI-LAN-IP>:8000"
+    apprise_config_key = "arr-stack"
+    service_name = "arr2torr / Radarr 1080p"
+    notification_timeout_sec = 5
+    notification_tag_critical = "critical"
+    notification_tag_warning = "warnings"
+    arr_ui_url = "http://<MINI-LAN-IP>:7878"
+
+Set `service_name` separately in each config, e.g. `arr2torr / Sonarr 1080p`; set `arr_ui_url` to the matching browser-facing Radarr or Sonarr base URL. Leave `arr_ui_url = ""` if you do not want links or the UI base URL is not reachable from Telegram. A link is included only when Arr returns a `titleSlug` and the UI base URL is set.
+
+The current deployed setup only has the 1080p Radarr and Sonarr timers active; keep 4K instance notifications disabled unless those instances are deliberately brought into service.
+
+Behavior:
+- A warning goes to `warnings` and contains only counts and add-attempt distribution for items awaiting automatic retry; it contains no names, hashes or item identifiers.
+- A final message goes to `critical` when an add/verification attempt becomes terminal or a permanent HTTP 4xx failure is encountered before the TorrServer add. Newly terminal items are grouped into as few messages as practical; each item includes its media title, release title when available, a sanitized cause, attempt information and an optional Arr card link.
+- The fingerprint for retry warnings and the one-time terminal-notification marker live in the shared SQLite database. Existing `failed` rows present before the v1.2.0 migration are baselined so an upgrade does not dump old failures into Telegram.
+- An Apprise outage is logged locally only; the importer does not fail solely because notification delivery failed and does not retry the same terminal alert indefinitely.
+
 
 ## 3. Dry-run before enabling the timer
 
