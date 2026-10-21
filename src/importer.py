@@ -849,7 +849,7 @@ def terminal_notification_block(cfg: Config, row: dict[str, Any], *, preparation
 
 def chunk_terminal_blocks(cfg: Config, blocks: list[str], limit: int = 3300) -> list[str]:
     intro = (
-        f"Инстанс: {cfg.name}. Передача следующих элементов не завершилась.\n"
+        f"Инстанс: {cfg.name}. Терминальных ошибок в этой сводке: {len(blocks)}.\n"
         f"Подробности журнала: journalctl -u torr-arr-importer@{cfg.name}.service -n 100 --no-pager"
     )
     chunks: list[str] = []
