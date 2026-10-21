@@ -23,7 +23,7 @@ chmod 0750 /var/lib/torr-arr-importer /var/log/torr-arr-importer
 
 systemctl daemon-reload
 
-echo "Installed torr-arr-importer v1.1.0"
+echo "Installed torr-arr-importer v1.2.0"
 echo "Create /etc/torr-arr-importer/radarr-1080.toml, then start:"
 echo "  systemctl start torr-arr-importer@radarr-1080.service"
 echo "  systemctl enable --now torr-arr-importer@radarr-1080.timer"
