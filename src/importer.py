@@ -23,11 +23,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 DEFAULT_PAGE_SIZE = 1000
 DEFAULT_TIMEOUT = 30
 
@@ -84,7 +84,7 @@ class Config:
     state_db: str
     history_page_size: int = DEFAULT_PAGE_SIZE
     timeout: int = DEFAULT_TIMEOUT
-    user_agent: str = "torr-arr-importer/1.1.0"
+    user_agent: str = "torr-arr-importer/1.2.0"
     log_level: str = "INFO"
     log_file: str = ""
     retry_count: int = 2
@@ -95,6 +95,14 @@ class Config:
     verification_poll_interval_sec: float = 3.0
     retry_backoff_sec: int = 60
     max_add_attempts: int = 3
+    arr_ui_url: str = ""
+    notifications_enabled: bool = False
+    apprise_url: str = ""
+    apprise_config_key: str = "arr-stack"
+    service_name: str = ""
+    notification_timeout_sec: int = 5
+    notification_tag_critical: str = "critical"
+    notification_tag_warning: str = "warnings"
 
     def normalized(self) -> "Config":
         arr_type = self.arr_type.strip().lower()
@@ -117,7 +125,40 @@ class Config:
             raise ValueError("retry_backoff_sec must be between 1 and 86400")
         if not 1 <= self.max_add_attempts <= 10:
             raise ValueError("max_add_attempts must be between 1 and 10")
-        return replace(self, arr_type=arr_type, category=category, lock_file=lock_file)
+        if not 1 <= self.notification_timeout_sec <= 30:
+            raise ValueError("notification_timeout_sec must be between 1 and 30")
+
+        arr_ui_url = self.arr_ui_url.strip().rstrip("/")
+        apprise_url = self.apprise_url.strip().rstrip("/")
+        for label, value in (("arr_ui_url", arr_ui_url), ("apprise_url", apprise_url)):
+            if not value:
+                continue
+            parts = urlsplit(value)
+            if (
+                parts.scheme not in {"http", "https"} or not parts.netloc
+                or parts.username or parts.password or parts.query or parts.fragment
+            ):
+                raise ValueError(
+                    f"{label} must be an HTTP(S) base URL without credentials, query or fragment"
+                )
+
+        config_key = self.apprise_config_key.strip()
+        critical_tag = self.notification_tag_critical.strip()
+        warning_tag = self.notification_tag_warning.strip()
+        service_name = self.service_name.strip() or f"arr2torr / {self.name}"
+        if self.notifications_enabled:
+            if not apprise_url:
+                raise ValueError("apprise_url is required when notifications_enabled=true")
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", config_key):
+                raise ValueError("apprise_config_key must contain only letters, digits, '_' or '-'")
+            if not critical_tag or not warning_tag:
+                raise ValueError("notification tags must not be empty")
+        return replace(
+            self, arr_type=arr_type, category=category, lock_file=lock_file,
+            arr_ui_url=arr_ui_url, apprise_url=apprise_url,
+            apprise_config_key=config_key, service_name=service_name,
+            notification_tag_critical=critical_tag, notification_tag_warning=warning_tag,
+        )
 
 
 @dataclass(frozen=True)
@@ -286,6 +327,8 @@ class StateDB:
                 arr_media_id INTEGER,
                 download_id TEXT,
                 title TEXT,
+                media_title TEXT,
+                title_slug TEXT,
                 imdb_id TEXT,
                 tmdb_id TEXT,
                 tvdb_id TEXT,
@@ -296,12 +339,54 @@ class StateDB:
                 last_checked_at TEXT,
                 last_status TEXT,
                 last_error TEXT,
-                next_retry_at TEXT
+                next_retry_at TEXT,
+                notification_attempted_at TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_pending_source_status
                 ON pending_adds(source, status);
-            """
+            CREATE TABLE IF NOT EXISTS notification_state (
+                state_key TEXT PRIMARY KEY,
+                fingerprint TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS terminal_events (
+                event_key TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                arr_type TEXT NOT NULL,
+                category TEXT NOT NULL,
+                arr_media_id INTEGER,
+                media_title TEXT,
+                release_title TEXT,
+                title_slug TEXT,
+                stage TEXT NOT NULL,
+                attempt_count INTEGER,
+                max_attempts INTEGER,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                notification_attempted_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_terminal_events_source
+                ON terminal_events(source, notification_attempted_at);
         )
+        columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(pending_adds)").fetchall()
+        }
+        added_notification_marker = "notification_attempted_at" not in columns
+        migrations = {
+            "media_title": "TEXT",
+            "title_slug": "TEXT",
+            "notification_attempted_at": "TEXT",
+        }
+        for column, column_type in migrations.items():
+            if column not in columns:
+                self.conn.execute(f"ALTER TABLE pending_adds ADD COLUMN {column} {column_type}")
+        if added_notification_marker:
+            # Suppress notifications for failures that predate this feature.
+            self.conn.execute(
+                "UPDATE pending_adds SET notification_attempted_at = ? WHERE status = 'failed'",
+                (datetime.now(timezone.utc).isoformat(),),
+            )
         self.conn.commit()
 
     def contains(self, torrent_hash: str) -> bool:
@@ -397,15 +482,19 @@ class StateDB:
                 """
                 INSERT INTO pending_adds
                   (hash, source, arr_history_id, arr_media_id, download_id, title,
-                   imdb_id, tmdb_id, tvdb_id, requested_at, deadline_at, attempt_count,
-                   status, last_checked_at, last_status, last_error, next_retry_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, 'request-started', NULL, NULL)
+                   media_title, title_slug, imdb_id, tmdb_id, tvdb_id, requested_at,
+                   deadline_at, attempt_count, status, last_checked_at, last_status,
+                   last_error, next_retry_at, notification_attempted_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL,
+                        'request-started', NULL, NULL, NULL)
                 ON CONFLICT(hash) DO UPDATE SET
                   source=excluded.source,
                   arr_history_id=excluded.arr_history_id,
                   arr_media_id=excluded.arr_media_id,
                   download_id=excluded.download_id,
                   title=excluded.title,
+                  media_title=excluded.media_title,
+                  title_slug=excluded.title_slug,
                   imdb_id=excluded.imdb_id,
                   tmdb_id=excluded.tmdb_id,
                   tvdb_id=excluded.tvdb_id,
@@ -416,12 +505,15 @@ class StateDB:
                   last_checked_at=NULL,
                   last_status='request-started',
                   last_error=NULL,
-                  next_retry_at=NULL
+                  next_retry_at=NULL,
+                  notification_attempted_at=NULL
                 """,
                 (
                     grab.hash, source, grab.history_id, grab.arr_media_id,
                     str(grab.data.get("downloadId") or grab.download_id or "") or None,
                     grab.source_title,
+                    str(media.get("title") or "") or None,
+                    str(media.get("titleSlug") or "") or None,
                     str(media.get("imdbId") or "") or None,
                     str(media.get("tmdbId") or "") or None,
                     str(media.get("tvdbId") or "") or None,
@@ -458,7 +550,8 @@ class StateDB:
                 """
                 UPDATE pending_adds
                 SET status = 'pending', deadline_at = ?, last_checked_at = ?,
-                    last_status = ?, last_error = NULL, next_retry_at = NULL
+                    last_status = ?, last_error = NULL, next_retry_at = NULL,
+                    notification_attempted_at = NULL
                 WHERE hash = ? AND status IN ('retry_wait', 'failed')
                 """,
                 (deadline, iso_now(), observed_status[:200], torrent_hash),
@@ -530,12 +623,107 @@ class StateDB:
                 """
                 UPDATE pending_adds
                 SET status = 'retry_wait', attempt_count = 0, next_retry_at = ?,
-                    last_error = 'Manually re-queued with --retry-failed'
+                    last_error = 'Manually re-queued with --retry-failed',
+                    notification_attempted_at = NULL
                 WHERE source = ? AND status = 'failed'
                 """,
                 (iso_now(), source),
             )
         return cur.rowcount
+
+    def record_terminal_event(
+        self,
+        event_key: str,
+        source: str,
+        arr_type: str,
+        category: str,
+        arr_media_id: int | None,
+        media_title: str | None,
+        release_title: str | None,
+        title_slug: str | None,
+        stage: str,
+        reason: str,
+    ) -> None:
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO terminal_events
+                  (event_key, source, arr_type, category, arr_media_id, media_title,
+                   release_title, title_slug, stage, attempt_count, max_attempts,
+                   reason, created_at, notification_attempted_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL)
+                """,
+                (
+                    event_key, source, arr_type, category, arr_media_id, media_title,
+                    release_title, title_slug, stage, reason[:1000], iso_now(),
+                ),
+            )
+
+    def unnotified_terminal_failures(self, source: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM pending_adds
+            WHERE source = ? AND status = 'failed'
+              AND notification_attempted_at IS NULL
+            ORDER BY requested_at
+            """,
+            (source,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def unnotified_terminal_events(self, source: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM terminal_events
+            WHERE source = ? AND notification_attempted_at IS NULL
+            ORDER BY created_at
+            """,
+            (source,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_pending_notifications_attempted(self, hashes: list[str]) -> None:
+        if not hashes:
+            return
+        now = iso_now()
+        placeholders = ",".join("?" for _ in hashes)
+        with self.conn:
+            self.conn.execute(
+                f"UPDATE pending_adds SET notification_attempted_at = ? "
+                f"WHERE hash IN ({placeholders})",
+                [now, *hashes],
+            )
+
+    def mark_terminal_events_attempted(self, event_keys: list[str]) -> None:
+        if not event_keys:
+            return
+        now = iso_now()
+        placeholders = ",".join("?" for _ in event_keys)
+        with self.conn:
+            self.conn.execute(
+                f"UPDATE terminal_events SET notification_attempted_at = ? "
+                f"WHERE event_key IN ({placeholders})",
+                [now, *event_keys],
+            )
+
+    def notification_fingerprint(self, state_key: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT fingerprint FROM notification_state WHERE state_key = ?",
+            (state_key,),
+        ).fetchone()
+        return str(row["fingerprint"]) if row else None
+
+    def set_notification_fingerprint(self, state_key: str, fingerprint: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO notification_state(state_key, fingerprint, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(state_key) DO UPDATE SET
+                  fingerprint=excluded.fingerprint, updated_at=excluded.updated_at
+                """,
+                (state_key, fingerprint, iso_now()),
+            )
 
     def close(self) -> None:
         self.conn.close()
@@ -543,6 +731,185 @@ class StateDB:
 
 def normalize_url(base: str, path: str) -> str:
     return base.rstrip("/") + "/" + path.lstrip("/")
+
+
+def permanent_preparation_error(exc: Exception) -> bool:
+    if isinstance(exc, HttpStatusError):
+        return 400 <= exc.code < 500 and not is_retryable_http(exc.code)
+    match = re.search(r"\bHTTP\s+(\d{3})\b", str(exc), flags=re.IGNORECASE)
+    if not match:
+        return False
+    code = int(match.group(1))
+    return 400 <= code < 500 and not is_retryable_http(code)
+
+
+def arr_card_url(cfg: Config, title_slug: str | None) -> str | None:
+    if not cfg.arr_ui_url or not title_slug:
+        return None
+    parts = urlsplit(cfg.arr_ui_url)
+    if parts.scheme not in {"http", "https"} or not parts.netloc or parts.username or parts.password:
+        return None
+    endpoint = "movie" if cfg.arr_type == "radarr" else "series"
+    slug = quote(str(title_slug).strip(), safe="-._~")
+    if not slug:
+        return None
+    base_path = parts.path.rstrip("/")
+    path = f"{base_path}/{endpoint}/{slug}" if base_path else f"/{endpoint}/{slug}"
+    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+
+
+def safe_notification_text(value: Any, max_length: int = 220) -> str:
+    text_value = str(value or "").replace("\x00", " ")
+    text_value = re.sub(r"(?i)\b(?:api[_-]?key|token|password|authorization)\s*[:=]\s*\S+", "<secret-redacted>", text_value)
+    text_value = re.sub(r"(?i)magnet:\?\S+", "<magnet-redacted>", text_value)
+    text_value = re.sub(r"https?://\S+", "<URL-redacted>", text_value)
+    text_value = re.sub(r"\b[a-fA-F0-9]{40,64}\b", "<hash-redacted>", text_value)
+    text_value = re.sub(r"\s+", " ", text_value).strip()
+    return text_value[:max_length] or "не указана"
+
+
+def apprise_notify(cfg: Config, title: str, body: str, notify_type: str, tag: str) -> bool:
+    if not cfg.notifications_enabled:
+        return False
+    endpoint = cfg.apprise_url.rstrip("/") + "/notify/" + quote(cfg.apprise_config_key, safe="")
+    payload = json.dumps(
+        {"title": title, "body": body, "type": notify_type, "tag": tag},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    request = Request(
+        endpoint,
+        data=payload,
+        headers={"Content-Type": "application/json", "Accept": "application/json",
+                 "User-Agent": cfg.user_agent},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=cfg.notification_timeout_sec) as response:
+            response.read(2048)
+            status = int(response.getcode())
+        if 200 <= status < 300:
+            logging.info("APPRISE_SENT source=%s tag=%s status=%d", cfg.name, tag, status)
+            return True
+        logging.warning("APPRISE_FAILED source=%s tag=%s http_status=%d", cfg.name, tag, status)
+    except HTTPError as exc:
+        logging.warning("APPRISE_FAILED source=%s tag=%s http_status=%d", cfg.name, tag, exc.code)
+    except Exception as exc:
+        # Do not send a notification about notification delivery failures.
+        logging.warning(
+            "APPRISE_FAILED source=%s tag=%s error_type=%s",
+            cfg.name, tag, type(exc).__name__,
+        )
+    return False
+
+
+def retry_warning_fingerprint(rows: list[dict[str, Any]]) -> tuple[str, str]:
+    if not rows:
+        return "", ""
+    attempts: dict[int, int] = {}
+    for row in rows:
+        count = int(row.get("attempt_count") or 0)
+        attempts[count] = attempts.get(count, 0) + 1
+    fingerprint = json.dumps(
+        {"count": len(rows), "attempts": sorted(attempts.items())},
+        separators=(",", ":"),
+    )
+    attempt_summary = ", ".join(
+        f"{number} попытка: {count}" for number, count in sorted(attempts.items())
+    )
+    return fingerprint, attempt_summary
+
+
+def terminal_notification_block(cfg: Config, row: dict[str, Any], *, preparation: bool = False) -> str:
+    media_title = safe_notification_text(
+        row.get("media_title") or row.get("title") or row.get("release_title") or "Неизвестный элемент",
+        180,
+    )
+    release_title = safe_notification_text(row.get("release_title") or row.get("title") or "", 220)
+    lines = [f"{'Фильм' if cfg.category == 'movie' else 'Сериал'}: {media_title}"]
+    if release_title and release_title != media_title:
+        lines.append(f"Релиз: {release_title}")
+    if preparation:
+        lines.append("Этап: подготовка ссылки (до обращения к TorrServer)")
+    else:
+        attempts = int(row.get("attempt_count") or 0)
+        reason = str(row.get("last_error") or row.get("reason") or "")
+        if permanent_preparation_error(ImporterError(reason)):
+            lines.append(f"Попытки выполнены: {attempts}; повтор прекращён из-за постоянной ошибки")
+        else:
+            lines.append(f"Попытки добавления/проверки: {attempts}/{cfg.max_add_attempts}")
+        lines.append("Этап: добавление или подтверждение в TorrServer")
+    reason_text = safe_notification_text(row.get("reason") or row.get("last_error") or "", 180)
+    lines.append(f"Причина: {reason_text}")
+    link = arr_card_url(cfg, row.get("title_slug"))
+    if link:
+        lines.append(f"Карточка Arr: {link}")
+    return "\n".join(lines)
+
+
+def chunk_terminal_blocks(cfg: Config, blocks: list[str], limit: int = 3300) -> list[str]:
+    intro = (
+        f"Инстанс: {cfg.name}. Передача следующих элементов не завершилась.\n"
+        f"Подробности журнала: journalctl -u torr-arr-importer@{cfg.name}.service -n 100 --no-pager"
+    )
+    chunks: list[str] = []
+    current: list[str] = []
+    for block in blocks:
+        candidate = intro + "\n\n" + "\n\n".join(current + [block])
+        if current and len(candidate) > limit:
+            chunks.append(intro + "\n\n" + "\n\n".join(current))
+            current = [block]
+        else:
+            current.append(block)
+    if current:
+        chunks.append(intro + "\n\n" + "\n\n".join(current))
+    return chunks
+
+
+def dispatch_notifications(cfg: Config, db: StateDB) -> None:
+    # Retry warnings contain counts only; their fingerprint deliberately excludes item identity.
+    retry_rows = [
+        row for row in db.pending_rows(source=cfg.name)
+        if row.get("status") == "retry_wait"
+    ]
+    fingerprint, attempt_summary = retry_warning_fingerprint(retry_rows)
+    state_key = f"{cfg.name}:retry_wait"
+    previous = db.notification_fingerprint(state_key)
+    if fingerprint and fingerprint != previous and cfg.notifications_enabled:
+        distribution = f" Распределение попыток: {attempt_summary}." if attempt_summary else ""
+        body = (
+            f"Инстанс {cfg.name}: {len(retry_rows)} проблемных раздач ожидают повторной попытки."
+            f"{distribution} Названия и идентификаторы элементов не включены; подробности находятся в локальном журнале."
+        )
+        apprise_notify(
+            cfg, f"{cfg.service_name} — Проблемы передачи (ожидается повтор)",
+            body, "warning", cfg.notification_tag_warning,
+        )
+    # Update the fingerprint regardless of delivery success, avoiding endless retries.
+    db.set_notification_fingerprint(state_key, fingerprint)
+
+    failed_rows = db.unnotified_terminal_failures(cfg.name)
+    terminal_events = db.unnotified_terminal_events(cfg.name)
+    if not failed_rows and not terminal_events:
+        return
+
+    blocks = [terminal_notification_block(cfg, row) for row in failed_rows]
+    blocks.extend(terminal_notification_block(cfg, row, preparation=True) for row in terminal_events)
+    chunks = chunk_terminal_blocks(cfg, blocks)
+    if cfg.notifications_enabled:
+        for index, body in enumerate(chunks, start=1):
+            suffix = f" ({index}/{len(chunks)})" if len(chunks) > 1 else ""
+            apprise_notify(
+                cfg, f"{cfg.service_name} — Ошибка передачи в TorrServer{suffix}",
+                body, "failure", cfg.notification_tag_critical,
+            )
+    else:
+        logging.info(
+            "APPRISE_SKIPPED source=%s reason=notifications-disabled terminal_items=%d",
+            cfg.name, len(blocks),
+        )
+    # Mark each terminal item after at most one delivery attempt; do not retry indefinitely.
+    db.mark_pending_notifications_attempted([str(row["hash"]) for row in failed_rows])
+    db.mark_terminal_events_attempted([str(row["event_key"]) for row in terminal_events])
 
 
 def as_int(value: Any) -> int | None:
@@ -935,6 +1302,20 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                     "FAILED source=%s hash=%s title=%r stage=prepare error=%s",
                     cfg.name, grab.hash, grab.source_title, exc,
                 )
+                if permanent_preparation_error(exc):
+                    media_for_error = media if isinstance(media, dict) else {}
+                    db.record_terminal_event(
+                        event_key=f"{cfg.name}:{grab.hash}:prepare",
+                        source=cfg.name,
+                        arr_type=cfg.arr_type,
+                        category=cfg.category,
+                        arr_media_id=grab.arr_media_id,
+                        media_title=str(media_for_error.get("title") or "") or None,
+                        release_title=grab.source_title or None,
+                        title_slug=str(media_for_error.get("titleSlug") or "") or None,
+                        stage="prepare",
+                        reason=str(exc),
+                    )
                 continue
 
             reason = (
@@ -1073,6 +1454,7 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                 sleep_for = min(sleep_for, max(0.1, min(remaining)))
             time.sleep(sleep_for)
 
+        dispatch_notifications(cfg, db)
         pending_count = len(db.pending_rows())
         logging.info(
             "DONE source=%s candidates=%d submitted=%d added=%d failed=%d pending=%d "
@@ -1109,7 +1491,7 @@ def config_from_file(path: str) -> Config:
         state_db=str(raw.get("state_db", "/var/lib/torr-arr-importer/state.db")),
         history_page_size=int(raw.get("history_page_size", DEFAULT_PAGE_SIZE)),
         timeout=int(raw.get("timeout", DEFAULT_TIMEOUT)),
-        user_agent=str(raw.get("user_agent", "torr-arr-importer/1.1.0")),
+        user_agent=str(raw.get("user_agent", "torr-arr-importer/1.2.0")),
         log_level=str(raw.get("log_level", "INFO")).upper(),
         log_file=str(raw.get("log_file", "")),
         retry_count=int(raw.get("retry_count", 2)),
@@ -1120,6 +1502,14 @@ def config_from_file(path: str) -> Config:
         verification_poll_interval_sec=float(raw.get("verification_poll_interval_sec", 3.0)),
         retry_backoff_sec=int(raw.get("retry_backoff_sec", 60)),
         max_add_attempts=int(raw.get("max_add_attempts", 3)),
+        arr_ui_url=str(raw.get("arr_ui_url", "")),
+        notifications_enabled=bool(raw.get("notifications_enabled", False)),
+        apprise_url=str(raw.get("apprise_url", "")),
+        apprise_config_key=str(raw.get("apprise_config_key", "arr-stack")),
+        service_name=str(raw.get("service_name", "")),
+        notification_timeout_sec=int(raw.get("notification_timeout_sec", 5)),
+        notification_tag_critical=str(raw.get("notification_tag_critical", "critical")),
+        notification_tag_warning=str(raw.get("notification_tag_warning", "warnings")),
     )
     return cfg.normalized()
 
