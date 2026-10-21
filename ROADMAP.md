@@ -1,6 +1,6 @@
 # Roadmap
 
-This document records the current **torr-arr-importer v1.1.0** implementation separately from remaining work and live validation.
+This document records the current **torr-arr-importer v1.2.0** implementation separately from remaining work and live validation.
 
 ## Implemented
 
@@ -68,9 +68,9 @@ This confirms the installed importer file and the current timer state at that ti
 
 The v1.1.0 behavior already implemented and documented includes asynchronous verification of TorrServer adds, durable pending_adds state, bounded exponential backoff, a default maximum of three add attempts, recovery using --retry-failed, and keeping unverified hashes out of successful import history. On 2026-10-21 the alternative release of *All Good Things (2010)* was confirmed to travel through the usual Arr → TorrServer → torr2strm → Jellyfin chain successfully. The original release failure was not conclusively attributed to a single cause; the controlled alternative-release test indicated the workflow itself can operate successfully.
 
-## Apprise notifications for retry and final transfer failures (design accepted 2026-10-21)
+## Apprise notifications for retry and final transfer failures (implemented in v1.2.0, 2026-10-21)
 
-**Status: agreed design; not implemented in arr2torr yet.** Follow the shared infrastructure contract in [media-server-tuning: notification contract](https://github.com/evgendman/media-server-tuning/blob/main/docs/notification-contract.md) and the actual tags in [Apprise notification routing](https://github.com/evgendman/media-server-tuning/blob/main/docs/apprise-notifications.md).
+**Status: implemented in the repository; live deployment and validation on MINI-Ubuntu remain pending.** Follow the shared infrastructure contract in [media-server-tuning: notification contract](https://github.com/evgendman/media-server-tuning/blob/main/docs/notification-contract.md) and the actual tags in [Apprise notification routing](https://github.com/evgendman/media-server-tuning/blob/main/docs/apprise-notifications.md).
 
 ### Required behavior
 
@@ -99,16 +99,30 @@ The low-level HTTP/network options retry_count and retry_delay control request r
 
 ### Implementation and test checklist
 
-- [ ] Inspect the v1.1.0 code and pending_adds schema to identify the authoritative title, Arr instance, release title, attempt count, terminal state and sanitized failure fields.
-- [ ] Add notification settings following the shared contract: enabled flag, Apprise base URL, config key arr-stack, service name, timeout and category tags. Do not add Telegram token/chat/topic IDs to arr2torr configuration.
-- [ ] Implement an Apprise client with bounded timeout and failure handling; notification failure must not change import success/failure semantics.
-- [ ] Aggregate interim warnings by source instance and attempt state; include only counts and attempt numbers, with no item names before terminal failure.
-- [ ] On terminal failure, aggregate all newly terminal items into one final message with names, useful release context and safe error summaries.
-- [ ] Persist notification status/outbox information if needed so restarts do not lose final alerts and later cycles do not resend them continuously.
-- [ ] Add optional user-facing Arr UI base URL and verified Radarr/Sonarr card link construction; gracefully omit a link if the route or ID cannot be trusted.
-- [ ] Test a successful retry (no final failure alert), a pending warning, exhausted attempts with several items (one named summary), a permanent/non-retryable failure, re-queue via --retry-failed, restart between terminal state and notification, unavailable Apprise, bad/unknown tags, timeouts, and no credential leakage.
-- [ ] Confirm interim notifications contain no item names; confirm only terminal failure notifications list names and optionally clickable links.
-- [ ] After implementation, document the exact configuration and validation results in the arr2torr repository.
+- [x] Inspect the existing code and pending_adds schema for media title, release title, Arr instance, attempt count and terminal failure state.
+- [x] Add opt-in notification settings following the shared contract; keep all Telegram secrets and topic IDs in Apprise.
+- [x] Implement a standard-library Apprise HTTP client with a bounded timeout and non-fatal delivery failures.
+- [x] Aggregate retry-wait warnings by source instance and attempt distribution; warning bodies contain no item-level identifiers and unchanged fingerprints are suppressed.
+- [x] Aggregate newly terminal failures per source run, including media/release titles, attempt information and sanitized causes.
+- [x] Persist retry-warning fingerprints and terminal notification-attempt markers in SQLite; baseline old failed rows during migration.
+- [x] Add a separate optional Arr UI base URL and best-effort /movie/<titleSlug> or /series/<titleSlug> links; omit links when unavailable.
+- [x] Add unit coverage for count-only warning aggregation/deduplication, terminal message details, permanent preparation failure, UI links, URL/hash redaction, disabled Apprise and non-fatal Apprise outage. Retry behavior and re-queue mechanics are otherwise unchanged.
+- [x] Assert interim warnings omit names and hashes while terminal alerts include the media/release context and optional link.
+- [x] Document notification configuration and operations; automated validation status will be recorded after the v1.2.0 CI run completes.
+
+
+## v1.2.0 implementation record (2026-10-21)
+
+The code is versioned as v1.2.0. This change adds notifications only; it does not alter `max_add_attempts`, `retry_backoff_sec`, retry eligibility, or the conditions required to record a verified TorrServer import.
+
+Implemented behavior:
+- Numeric `warnings` summaries for retry-wait items, deduplicated with an SQLite fingerprint based on count and attempt distribution.
+- A named `critical` group for newly terminal TorrServer failures and permanent HTTP 4xx preparation errors, including media title, release title when available, sanitized reason and an optional Arr card link.
+- One-time terminal-notification markers, bounded Apprise HTTP timeout and non-fatal send errors.
+- In-place SQLite column migration; pre-existing `failed` rows are baselined to avoid a flood of stale notifications after upgrade.
+- Four configuration examples default to notifications disabled. The intended MINI-Ubuntu deployment will enable only `radarr-1080` and `sonarr-1080`, matching the last observed live timer state; 4K timers stay disabled.
+
+The GitHub Actions workflow compiles the source and runs unit tests on Python 3.11 and 3.12. The result for the final v1.2.0 source/test commit is to be recorded here after it completes. Live deployment verification is separate from CI and must not be claimed before the on-host commands have been run.
 
 ## Planned improvements
 
