@@ -26,6 +26,71 @@ The installer does not enable timers automatically. Configure and test an instan
 
 > API keys belong only in local files under /etc/torr-arr-importer/. Never commit a populated config to Git.
 
+
+## Upgrade an existing v1.1.0 deployment in place
+
+The v1.2.0 source/test revision validated in GitHub Actions is commit `74ee8ac9a8a171be790b5cc314b888cf2e5e19f5` (Python 3.11 and 3.12, 19 tests passed). The upgrade is additive: it adds SQLite columns/tables for notification state, but does not clear or rebuild import history. **Do not delete `/var/lib/torr-arr-importer/state.db`.** The commands below preserve the existing configs and timer enablement.
+
+1. Clone that exact tested revision to a fresh temporary directory, then run tests locally:
+
+       set -euo pipefail
+       SRC="$(mktemp -d /tmp/arr2torr-v1.2.0.XXXXXX)"
+       git clone https://github.com/evgendman/arr2torr.git "$SRC"
+       git -C "$SRC" checkout 74ee8ac9a8a171be790b5cc314b888cf2e5e19f5
+       python3 -m py_compile "$SRC/src/importer.py"
+       (cd "$SRC" && python3 -m unittest discover -s tests -v)
+       python3 "$SRC/src/importer.py" --version
+       printf '%s\n' "$SRC" > /tmp/arr2torr-v1.2.0-source-path
+
+2. Stop only the two timers observed active on MINI-Ubuntu, and wait for any oneshot services to finish. Do not enable either 4K timer:
+
+       sudo systemctl stop torr-arr-importer@radarr-1080.timer torr-arr-importer@sonarr-1080.timer
+       while systemctl is-active --quiet torr-arr-importer@radarr-1080.service || systemctl is-active --quiet torr-arr-importer@sonarr-1080.service; do sleep 1; done
+
+3. Back up the live source, config, systemd units and database before installation:
+
+       set -euo pipefail
+       BACKUP="$(mktemp -d /tmp/arr2torr-v1.1.0-backup.XXXXXX)"
+       sudo install -d -m 0700 "$BACKUP"
+       sudo cp -a /opt/torr-arr-importer/importer.py "$BACKUP/importer.py"
+       sudo cp -a /etc/torr-arr-importer "$BACKUP/config"
+       sudo cp -a /etc/systemd/system/torr-arr-importer@.service "$BACKUP/"
+       sudo cp -a /etc/systemd/system/torr-arr-importer@.timer "$BACKUP/"
+       sudo python3 - "$BACKUP/state.db" <<'PY'
+       import os, sqlite3, sys
+       source = "/var/lib/torr-arr-importer/state.db"
+       if not os.path.isfile(source):
+           raise SystemExit(f"State database not found: {source}")
+       src = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+       dst = sqlite3.connect(sys.argv[1])
+       src.backup(dst)
+       dst.close()
+       src.close()
+       PY
+       printf '%s\n' "$BACKUP" > /tmp/arr2torr-v1.2.0-backup-path
+       echo "Backup saved under: $BACKUP"
+
+4. Add the opt-in Apprise settings described below to **only** `radarr-1080.toml` and `sonarr-1080.toml`. Leave existing API keys and all retry settings unchanged. Set `arr_ui_url` to the matching browser-facing base URL if you want best-effort item-card links; use an empty string to omit links.
+
+5. Install the staged files, without running any import yet:
+
+       SRC="$(cat /tmp/arr2torr-v1.2.0-source-path)"
+       sudo "$SRC/install.sh"
+       /opt/torr-arr-importer/importer.py --version
+       sudo cmp "$SRC/src/importer.py" /opt/torr-arr-importer/importer.py
+
+6. Run dry-runs with the two existing profiles to validate TOML and API reachability. These commands do not add torrents:
+
+       sudo -u torrimport /opt/torr-arr-importer/importer.py --config /etc/torr-arr-importer/radarr-1080.toml --dry-run
+       sudo -u torrimport /opt/torr-arr-importer/importer.py --config /etc/torr-arr-importer/sonarr-1080.toml --dry-run
+
+7. Start the same timers again and check the state. This starts the previously enabled 1080p timers; it does not enable new units:
+
+       sudo systemctl start torr-arr-importer@radarr-1080.timer torr-arr-importer@sonarr-1080.timer
+       systemctl list-timers 'torr-arr-importer@*' --all --no-pager
+
+If rollback is required, stop those timers and restore the backed-up `importer.py` and systemd unit files from the directory recorded in `/tmp/arr2torr-v1.2.0-backup-path`, then run `sudo systemctl daemon-reload` and start only the same two timers. Do **not** overwrite the live database with the old backup as a routine rollback step: the v1.2.0 schema additions are backward-compatible with v1.1.0, and restoring an old DB could discard importer state created since the backup.
+
 ## 2. Instance naming and profiles
 
 Use one config file and one systemd instance per Arr instance:
