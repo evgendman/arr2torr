@@ -165,7 +165,7 @@ The current stored data subset includes source instance name, media type, target
 - [Roadmap and validation status](ROADMAP.md)
 - [Version history](CHANGELOG.md)
 
-The current code package is **torr-arr-importer v1.0.3**. It uses Python 3.11+ and the standard library; it does not require external Python packages.
+The current code package is **torr-arr-importer v1.1.0**. It uses Python 3.11+ and the standard library; it does not require external Python packages.
 
 ## Related project: STRM/NFO library generation
 
@@ -173,6 +173,6 @@ The current code package is **torr-arr-importer v1.0.3**. It uses Python 3.11+ a
 
 ## Current status
 
-The v1.0.3 implementation has been exercised against the live Radarr and TorrServer APIs. The Radarr path has passed real add, repeat-run deduplication, “do not resurrect a removed torrent” and rebuild checks. Sonarr history parsing and duplicate-hash behavior have been checked; an end-to-end live test where a **new** Sonarr Grab is imported remains on the validation list.
+The v1.1.0 implementation has been exercised against the live Radarr and TorrServer APIs. The Radarr path has passed real add, repeat-run deduplication, “do not resurrect a removed torrent” and rebuild checks. Sonarr history parsing and duplicate-hash behavior have been checked; an end-to-end live test where a **new** Sonarr Grab is imported remains on the validation list.
 
 The importer is designed to be conservative: TorrServer membership and the shared history are compared on every run, failed additions are logged, and normal operation does not override a deliberate removal decision.
