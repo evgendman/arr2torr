@@ -278,5 +278,170 @@ class BatchVerificationTests(unittest.TestCase):
             db.close()
 
 
+
+
+class NotificationTests(unittest.TestCase):
+    def make_notification_config(self, root):
+        return importer.replace(
+            make_config(root),
+            arr_ui_url="http://192.168.0.14:7878",
+            notifications_enabled=True,
+            apprise_url="http://192.168.0.14:8000",
+            apprise_config_key="arr-stack",
+            service_name="arr2torr / Radarr 1080p",
+            notification_timeout_sec=5,
+            notification_tag_critical="critical",
+            notification_tag_warning="warnings",
+        ).normalized()
+
+    def fake_apprise(self, captured):
+        def send(request, timeout):
+            captured.append({
+                "url": request.full_url,
+                "payload": json.loads(request.data.decode("utf-8")),
+                "timeout": timeout,
+            })
+            response = mock.MagicMock()
+            response.__enter__.return_value = response
+            response.__exit__.return_value = False
+            response.getcode.return_value = 200
+            response.read.return_value = b'{"status":"OK"}'
+            return response
+        return send
+
+    def test_retry_warning_is_numeric_aggregated_and_deduplicated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = self.make_notification_config(root)
+            db = importer.StateDB(cfg.state_db)
+            one = make_grab(HASH1, 1, "Private.Release.Name.1080p")
+            two = make_grab(HASH2, 2, "Another.Private.Release.Name.1080p")
+            for grab in (one, two):
+                db.begin_pending(grab, cfg.name, {"title": "Secret Film Title"}, 120)
+                self.assertEqual(db.fail_pending(grab.hash, "metadata timeout", 3, 1), "retry_wait")
+
+            sent = []
+            with mock.patch.object(importer, "urlopen", side_effect=self.fake_apprise(sent)):
+                importer.dispatch_notifications(cfg, db)
+                self.assertEqual(len(sent), 1)
+                importer.dispatch_notifications(cfg, db)
+                self.assertEqual(len(sent), 1)
+
+            payload = sent[0]["payload"]
+            self.assertEqual(sent[0]["url"], "http://192.168.0.14:8000/notify/arr-stack")
+            self.assertEqual(sent[0]["timeout"], 5)
+            self.assertEqual(payload["tag"], "warnings")
+            self.assertEqual(payload["type"], "warning")
+            self.assertIn("2 проблемных раздач", payload["body"])
+            self.assertNotIn("Secret Film Title", payload["body"])
+            self.assertNotIn("Private.Release.Name", payload["body"])
+            self.assertNotIn(HASH1, payload["body"])
+            self.assertNotIn(HASH2, payload["body"])
+            db.close()
+
+    def test_terminal_failure_includes_title_release_and_arr_card_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_notification_config(Path(tmp))
+            db = importer.StateDB(cfg.state_db)
+            grab = make_grab(HASH1, 1, "All.Good.Things.2010.1080p.WEB-DL")
+            db.begin_pending(
+                grab, cfg.name,
+                {"title": "All Good Things", "titleSlug": "all-good-things-2010-603"},
+                120,
+            )
+            self.assertEqual(
+                db.fail_pending(HASH1, "verification deadline expired; metadata timeout", 1, 1),
+                "failed",
+            )
+            sent = []
+            with mock.patch.object(importer, "urlopen", side_effect=self.fake_apprise(sent)):
+                importer.dispatch_notifications(cfg, db)
+                self.assertEqual(len(sent), 1)
+                importer.dispatch_notifications(cfg, db)
+                self.assertEqual(len(sent), 1)
+
+            payload = sent[0]["payload"]
+            self.assertEqual(payload["tag"], "critical")
+            self.assertEqual(payload["type"], "failure")
+            self.assertIn("All Good Things", payload["body"])
+            self.assertIn("All.Good.Things.2010.1080p.WEB-DL", payload["body"])
+            self.assertIn("http://192.168.0.14:7878/movie/all-good-things-2010-603", payload["body"])
+            self.assertNotIn(HASH1, payload["body"])
+            self.assertEqual(len(db.unnotified_terminal_failures(cfg.name)), 0)
+            db.close()
+
+    def test_permanent_prepare_failure_is_aggregated_without_leaking_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_notification_config(Path(tmp))
+            db = importer.StateDB(cfg.state_db)
+            db.record_terminal_event(
+                event_key=f"{cfg.name}:{HASH1}:prepare",
+                source=cfg.name,
+                arr_type="radarr",
+                category="movie",
+                arr_media_id=123,
+                media_title="The Prestige",
+                release_title="The.Prestige.1080p.WEB-DL",
+                title_slug="the-prestige-2006",
+                stage="prepare",
+                reason="HTTP 410 resolving download URL https://indexer.invalid/?apikey=do-not-send",
+            )
+            sent = []
+            with mock.patch.object(importer, "urlopen", side_effect=self.fake_apprise(sent)):
+                importer.dispatch_notifications(cfg, db)
+
+            self.assertEqual(len(sent), 1)
+            payload = sent[0]["payload"]
+            self.assertEqual(payload["tag"], "critical")
+            self.assertIn("The Prestige", payload["body"])
+            self.assertIn("HTTP 410 resolving download URL", payload["body"])
+            self.assertNotIn("indexer.invalid", payload["body"])
+            self.assertNotIn("do-not-send", payload["body"])
+            self.assertNotIn(HASH1, payload["body"])
+            self.assertEqual(db.unnotified_terminal_events(cfg.name), [])
+            db.close()
+
+    def test_apprise_failure_does_not_raise_or_retry_forever(self):
+        from urllib.error import URLError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_notification_config(Path(tmp))
+            db = importer.StateDB(cfg.state_db)
+            grab = make_grab(HASH1, 1, "Example.Release.1080p")
+            db.begin_pending(grab, cfg.name, {"title": "Example Film"}, 120)
+            db.fail_pending(HASH1, "metadata timeout", 1, 1)
+
+            with mock.patch.object(importer, "urlopen", side_effect=URLError("offline")) as send:
+                importer.dispatch_notifications(cfg, db)
+                self.assertEqual(len(db.unnotified_terminal_failures(cfg.name)), 0)
+                importer.dispatch_notifications(cfg, db)
+                self.assertEqual(send.call_count, 1)
+            db.close()
+
+    def test_notification_disabled_makes_no_http_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = importer.replace(make_config(Path(tmp)), notifications_enabled=False)
+            db = importer.StateDB(cfg.state_db)
+            grab = make_grab(HASH1, 1, "Example.Release.1080p")
+            db.begin_pending(grab, cfg.name, {"title": "Example Film"}, 120)
+            db.fail_pending(HASH1, "metadata timeout", 1, 1)
+
+            with mock.patch.object(importer, "urlopen") as send:
+                importer.dispatch_notifications(cfg, db)
+                send.assert_not_called()
+            self.assertEqual(db.unnotified_terminal_failures(cfg.name), [])
+            db.close()
+
+    def test_url_and_hash_are_redacted_from_notification_causes(self):
+        message = importer.safe_notification_text(
+            "HTTP 410 from https://indexer.invalid/?apikey=secret "
+            "magnet:?xt=urn:btih:" + HASH1 + " " + HASH1
+        )
+        self.assertNotIn("indexer.invalid", message)
+        self.assertNotIn("secret", message)
+        self.assertNotIn(HASH1, message)
+        self.assertIn("<URL-redacted>", message)
+        self.assertIn("<hash-redacted>", message)
+
 if __name__ == "__main__":
     unittest.main()
