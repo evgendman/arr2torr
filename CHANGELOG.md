@@ -15,7 +15,7 @@
 - Clarified the history summary counters: unique_hashes and duplicates replace the ambiguous valid count.
 - Removed a duplicate data assignment.
 - Updated the default User-Agent and version string to 1.0.3.
-- Represents the current version used for the project documentation.
+- Historical baseline for the core history, metadata and retry handling; superseded as the current code version by v1.1.0.
 
 ## v1.0.2
 
