@@ -1,6 +1,6 @@
 # Architecture and state model
 
-This document describes the behavior implemented by **torr-arr-importer v1.0.3**. It separates current behavior from work that may be added later.
+This document describes the current **torr-arr-importer v1.1.0** behavior and data mapping. The existing TorrServer metadata payload retains the core field subset introduced in v1.0.3; v1.1.0 adds asynchronous add verification, persistent pending attempts and bounded retries.
 
 ## 1. Source of truth
 
@@ -142,7 +142,7 @@ Conceptual payload:
 
 For a Radarr instance, the category is movie; for Sonarr, tv. The importer validates that the configured Arr type and category agree.
 
-The v1.0.3 data payload contains this subset when the value is available:
+The current TorrServer data payload contains this subset when the value is available:
 
 | Key | Meaning |
 |---|---|
@@ -158,7 +158,7 @@ The v1.0.3 data payload contains this subset when the value is available:
 | release_group | Release group from history, if present |
 | arr_custom_format_score | Custom Format score from history, if present |
 
-The entire history data object is not persisted. In particular, the Prowlarr downloadUrl and nzbInfoUrl are excluded to avoid leaking URL credentials. The history quality, languages and full customFormats arrays are currently read by the code but are not written into TorrServer data in v1.0.3; fuller metadata preservation is a roadmap item.
+The entire history data object is not persisted. In particular, the Prowlarr downloadUrl and nzbInfoUrl are excluded to avoid leaking URL credentials. The history quality, languages and full customFormats arrays are currently read by the code but are not written into the TorrServer data payload; fuller metadata preservation is a roadmap item.
 
 target_quality is descriptive configuration data. It represents which Arr lane chose the release; it does not measure stream dimensions and must not be treated as a substitute for video metadata.
 
