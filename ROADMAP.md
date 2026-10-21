@@ -30,7 +30,7 @@ This document records the current **torr-arr-importer v1.2.0** implementation se
 - **Sonarr history path:** records parse and duplicate hashes are recognized correctly; a dry-run with a hash already in TorrServer produced no candidate.
 
 The last item is not the same as a complete live test of a **new** Sonarr Grab flowing into an initially missing TorrServer hash. That end-to-end case remains to be verified.
-- **Automation:** v1.1.0 had 12 unit tests. For v1.2.0, GitHub Actions passed both Python 3.11 and 3.12 matrix jobs with 18 unit tests at source commit `abab4989c28181611c667e63b499efa124da870c`; this covers compilation, warning aggregation/deduplication, terminal summaries, redaction and non-fatal Apprise failures.
+- **Automation:** v1.1.0 had 12 unit tests. For v1.2.0, GitHub Actions passed both Python 3.11 and 3.12 matrix jobs with 19 unit tests at commit `74ee8ac9a8a171be790b5cc314b888cf2e5e19f5`; coverage includes compilation, count-only warning aggregation/deduplication, grouped terminal summaries, redaction, disabled-to-enabled notification delivery, non-fatal Apprise errors and in-place migration of a v1.1.0 SQLite database.
 
 ## Deployment baseline and working version (2026-10-21)
 
@@ -106,9 +106,9 @@ The low-level HTTP/network options retry_count and retry_delay control request r
 - [x] Aggregate newly terminal failures per source run, including media/release titles, attempt information and sanitized causes.
 - [x] Persist retry-warning fingerprints and terminal notification-attempt markers in SQLite; baseline old failed rows during migration.
 - [x] Add a separate optional Arr UI base URL and best-effort /movie/<titleSlug> or /series/<titleSlug> links; omit links when unavailable.
-- [x] Add unit coverage for count-only warning aggregation/deduplication, terminal message details, permanent preparation failure, UI links, URL/hash redaction, disabled Apprise and non-fatal Apprise outage. Retry behavior and re-queue mechanics are otherwise unchanged.
+- [x] Add unit coverage for count-only warning aggregation/deduplication, grouped terminal failures, permanent preparation failure, UI link formatting, URL/hash redaction, disabled-to-enabled delivery, non-fatal Apprise outage and v1.1.0 SQLite migration.
 - [x] Assert interim warnings omit names and hashes while terminal alerts include the media/release context and optional link.
-- [x] Document notification configuration and operations; automated validation status will be recorded after the v1.2.0 CI run completes.
+- [x] Document notification configuration, upgrade safeguards and operations; CI passed on Python 3.11/3.12. Live deployment verification remains pending.
 
 
 ## v1.2.0 implementation record (2026-10-21)
@@ -122,7 +122,7 @@ Implemented behavior:
 - In-place SQLite column migration; pre-existing `failed` rows are baselined to avoid a flood of stale notifications after upgrade.
 - Four configuration examples default to notifications disabled. The intended MINI-Ubuntu deployment will enable only `radarr-1080` and `sonarr-1080`, matching the last observed live timer state; 4K timers stay disabled.
 
-The GitHub Actions workflow passed on both Python 3.11 and 3.12 with 18 unit tests for source commit `abab4989c28181611c667e63b499efa124da870c`. Live deployment verification remains separate from CI and has not yet been performed on MINI-Ubuntu.
+The GitHub Actions workflow passed on both Python 3.11 and 3.12 with 19 unit tests for source/test commit `74ee8ac9a8a171be790b5cc314b888cf2e5e19f5`. The deployed source should be pinned to this tested commit. Live deployment verification remains separate from CI and has not yet been performed on MINI-Ubuntu.
 
 ## Planned improvements
 
