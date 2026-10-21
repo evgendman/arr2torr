@@ -901,7 +901,7 @@ def dispatch_notifications(cfg: Config, db: StateDB) -> None:
         for index, body in enumerate(chunks, start=1):
             suffix = f" ({index}/{len(chunks)})" if len(chunks) > 1 else ""
             apprise_notify(
-                cfg, f"{cfg.service_name} — Ошибка передачи в TorrServer{suffix}",
+                cfg, f"{cfg.service_name} — Ошибка передачи релиза{suffix}",
                 body, "failure", cfg.notification_tag_critical,
             )
         # Mark after at most one delivery attempt, including HTTP failure; do not
