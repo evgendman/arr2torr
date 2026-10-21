@@ -50,6 +50,22 @@ done
 
 The installed version check is read-only. A systemd oneshot service can be inactive between runs; timer state and next-elapse time are the primary signals for periodic scheduling. A prior investigation stopped some timers and inspected pending retry state, so the current runtime state must be read from the host rather than inferred from GitHub. Do not delete or reset the SQLite state database while checking.
 
+### On-host verification (2026-10-21, 17:35 Asia/Yekaterinburg)
+
+The user ran the read-only checks on MINI-Ubuntu and reported:
+
+- /opt/torr-arr-importer/importer.py --version returned 1.1.0.
+- The installed file reports VERSION = "1.1.0".
+- git hash-object /opt/torr-arr-importer/importer.py returned 082d54b07613e789ae9a1bb9ac7113c97776d4e7, identical to the Git blob SHA of current main:src/importer.py. The installed program file therefore matches the repository's current source file byte-for-byte.
+- torr-arr-importer@radar-1080.timer is enabled and active.
+- torr-arr-importer@sonarr-1080.timer is enabled and active.
+- torr-arr-importer@radar-4k.timer is disabled and inactive.
+- torr-arr-importer@sonarr-4k.timer is disabled and inactive.
+- systemctl list-timers showed the next run for the two enabled timers around 17:39 on 2026-10-21.
+
+This confirms the installed importer file and the current timer state at that time. The timer state is recorded as observed, not as a recommendation to enable either 4K instance. No SQLite state or service configuration was changed by this verification.
+
+
 The v1.1.0 behavior already implemented and documented includes asynchronous verification of TorrServer adds, durable pending_adds state, bounded exponential backoff, a default maximum of three add attempts, recovery using --retry-failed, and keeping unverified hashes out of successful import history. On 2026-10-21 the alternative release of *All Good Things (2010)* was confirmed to travel through the usual Arr → TorrServer → torr2strm → Jellyfin chain successfully. The original release failure was not conclusively attributed to a single cause; the controlled alternative-release test indicated the workflow itself can operate successfully.
 
 ## Apprise notifications for retry and final transfer failures (design accepted 2026-10-21)
