@@ -9,7 +9,7 @@ A normal cycle logs a concise summary of each stage:
 3. A TorrServer list snapshot is read.
 4. SNAPSHOT — number of distinct Arr grabs, hashes currently on TorrServer, hashes already known to the shared import history and new candidates.
 5. For each candidate, Arr media/series details are fetched as needed, then an add is sent to TorrServer.
-6. ADDED confirms the response contained the expected hash.
+6. ADD_ACCEPTED logs TorrServer's initial acknowledgement; ADDED is logged only after readiness or database-presence evidence confirms the hash.
 7. DONE records candidates, added/failed counts, hashes skipped as already present, hashes skipped as previously imported, elapsed time and dry-run mode where applicable.
 
 Example commands:
