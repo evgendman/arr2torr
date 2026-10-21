@@ -32,6 +32,68 @@ This document records the current **torr-arr-importer v1.1.0** implementation se
 The last item is not the same as a complete live test of a **new** Sonarr Grab flowing into an initially missing TorrServer hash. That end-to-end case remains to be verified.
 - **Automation:** GitHub Actions compiles the importer and runs 12 unit tests on Python 3.11 and 3.12; both matrix jobs passed for v1.1.0.
 
+## Deployment baseline and working version (2026-10-21)
+
+**Version recorded as installed on MINI-Ubuntu:** torr-arr-importer **v1.1.0**, dated 2026-10-20, with the installed checkout recorded as commit **7831553da914b147d65989699b34a84c3ce238e5**. The current source file declares VERSION = "1.1.0"; the current installer also reports v1.1.0. The latest source history after the deployment record contains documentation updates; this does not itself prove that the live file on the host has not been changed manually. Run the on-host checks below before treating the installed file and enabled timers as freshly verified.
+
+~~~bash
+sudo /opt/torr-arr-importer/importer.py --version
+sudo grep -n '^VERSION =' /opt/torr-arr-importer/importer.py
+sudo sha256sum /opt/torr-arr-importer/importer.py
+systemctl list-timers --all 'torr-arr-importer@*' --no-pager
+for instance in radarr-1080 radarr-4k sonarr-1080 sonarr-4k; do
+  echo "===== $instance ====="
+  systemctl is-enabled "torr-arr-importer@$instance.timer" 2>&1 || true
+  systemctl is-active "torr-arr-importer@$instance.timer" 2>&1 || true
+done
+~~~
+
+The installed version check is read-only. A systemd oneshot service can be inactive between runs; timer state and next-elapse time are the primary signals for periodic scheduling. A prior investigation stopped some timers and inspected pending retry state, so the current runtime state must be read from the host rather than inferred from GitHub. Do not delete or reset the SQLite state database while checking.
+
+The v1.1.0 behavior already implemented and documented includes asynchronous verification of TorrServer adds, durable pending_adds state, bounded exponential backoff, a default maximum of three add attempts, recovery using --retry-failed, and keeping unverified hashes out of successful import history. On 2026-10-21 the alternative release of *All Good Things (2010)* was confirmed to travel through the usual Arr → TorrServer → torr2strm → Jellyfin chain successfully. The original release failure was not conclusively attributed to a single cause; the controlled alternative-release test indicated the workflow itself can operate successfully.
+
+## Apprise notifications for retry and final transfer failures (design accepted 2026-10-21)
+
+**Status: agreed design; not implemented in arr2torr yet.** Follow the shared infrastructure contract in [media-server-tuning: notification contract](https://github.com/evgendman/media-server-tuning/blob/main/docs/notification-contract.md) and the actual tags in [Apprise notification routing](https://github.com/evgendman/media-server-tuning/blob/main/docs/apprise-notifications.md).
+
+### Required behavior
+
+- Keep detailed logs as the diagnostic source of truth. Telegram messages are an additional summary/action channel, not a copy of every log line.
+- Route interim retry warnings to tag **warnings** with Apprise type **warning**.
+- **Before the retry process reaches a terminal failure, do not include movie/series titles, release names, hashes or other item-level identifiers.** Send aggregate numeric information only: number of currently unverified/problematic items and attempt information based on the add-attempt counter, for example a count grouped by attempt number when items are at different stages.
+- Do not generate a separate Telegram message for every torrent. Aggregate interim state at the end of a run and avoid repeating an unchanged warning on every timer invocation. Notify when the pending count or retry state meaningfully changes.
+- When an item reaches terminal failure—normally after max_add_attempts is exhausted, or sooner if the failure is classified as permanent/non-retryable and no automatic retry will occur—route a final message to tag **critical** with Apprise type **failure**.
+- The final message must identify the affected Arr instance and list the human-readable movie/series title. Include the selected release title when available, attempts used versus the limit (or indicate a permanent non-retryable error), and a sanitized short reason. Do not include the credential-bearing download URL, API keys or unnecessary full hashes.
+- Produce one aggregated final notification per run/state transition for the set of newly terminal items, not one message per failed torrent. Respect Telegram message-size limits; if a very large list must be split, split into the fewest practical messages while preserving a clear total count.
+- Avoid duplicate final alerts on later timer cycles. Persist or otherwise reliably derive whether a particular terminal transition has already been notified. If notification delivery fails, log the problem locally without causing the importer itself to fail or recursively trying to notify about notification delivery.
+- Keep automatic retry policy and selection logic unchanged as part of the initial notification integration. This work adds observability; it does not add infinite retries or silently re-queue exhausted items.
+
+### Direct link to Arr
+
+Try to include a clickable link to the exact Radarr movie or Sonarr series card in the final terminal-failure message so the user can open Arr and choose another release without searching manually.
+
+- Build a link only when a trustworthy Arr media ID and a client-reachable UI base URL are available.
+- Verify the actual Radarr and Sonarr UI route patterns against the installed versions before generating links. The API base URL configured for the service is not automatically guaranteed to be reachable from the Telegram client; add a separate optional UI base URL if necessary.
+- Never put API keys or credential-bearing download URLs into the link.
+- A link is optional: lack of a verified card URL must not prevent sending the title, failure summary and log reference.
+
+### Event and state semantics
+
+The low-level HTTP/network options retry_count and retry_delay control request retries; do not confuse them with the TorrServer add/verification counter stored in pending_adds. Use attempt_count and max_add_attempts for notification language about the add attempt. A retryable verification failure remains a warning while another automatic attempt is still scheduled. A terminal state sends a named final failure only once per terminal transition.
+
+### Implementation and test checklist
+
+- [ ] Inspect the v1.1.0 code and pending_adds schema to identify the authoritative title, Arr instance, release title, attempt count, terminal state and sanitized failure fields.
+- [ ] Add notification settings following the shared contract: enabled flag, Apprise base URL, config key arr-stack, service name, timeout and category tags. Do not add Telegram token/chat/topic IDs to arr2torr configuration.
+- [ ] Implement an Apprise client with bounded timeout and failure handling; notification failure must not change import success/failure semantics.
+- [ ] Aggregate interim warnings by source instance and attempt state; include only counts and attempt numbers, with no item names before terminal failure.
+- [ ] On terminal failure, aggregate all newly terminal items into one final message with names, useful release context and safe error summaries.
+- [ ] Persist notification status/outbox information if needed so restarts do not lose final alerts and later cycles do not resend them continuously.
+- [ ] Add optional user-facing Arr UI base URL and verified Radarr/Sonarr card link construction; gracefully omit a link if the route or ID cannot be trusted.
+- [ ] Test a successful retry (no final failure alert), a pending warning, exhausted attempts with several items (one named summary), a permanent/non-retryable failure, re-queue via --retry-failed, restart between terminal state and notification, unavailable Apprise, bad/unknown tags, timeouts, and no credential leakage.
+- [ ] Confirm interim notifications contain no item names; confirm only terminal failure notifications list names and optionally clickable links.
+- [ ] After implementation, document the exact configuration and validation results in the arr2torr repository.
+
 ## Planned improvements
 
 ### 1. Preserve more useful Arr metadata
