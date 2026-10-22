@@ -179,6 +179,10 @@ The current code package is **torr-arr-importer v1.2.0**. It uses Python 3.11+ a
 
 ## Current status
 
-The v1.1.0 implementation has been exercised against the live Radarr and TorrServer APIs. The Radarr path has passed real add, repeat-run deduplication, “do not resurrect a removed torrent” and rebuild checks. Sonarr history parsing and duplicate-hash behavior have been checked; an end-to-end live test where a **new** Sonarr Grab is imported remains on the validation list.
+Version **1.2.0 is installed and live-validated on MINI-Ubuntu** (2026-10-22). Both configured 1080p timer instances—Radarr and Sonarr—completed live runs successfully. New movie and series Grab records were transferred to TorrServer; successful additions were confirmed by post-add verification using observable file metadata, and later ordinary runs skipped hashes already present or previously handled.
 
-The importer is designed to be conservative: TorrServer membership and the shared history are compared on every run, failed additions are logged, and normal operation does not override a deliberate removal decision.
+The v1.2.0 Apprise notification flow has also been exercised end to end. Warning messages and a grouped critical message were received in Telegram. For five warning sends and one critical send observed on 2026-10-22, the importer logged `APPRISE_SENT` with HTTP 200, and Apprise logged `Sent Telegram notification`, `Delivered Notification(s)` and HTTP 200. One earlier send at 10:36:52 logged HTTP 424 and a Telegram connection error; the exact relationship to a warning the user reports receiving could not be conclusively matched by timestamp. Subsequent observed sends succeeded.
+
+Not every torrent is guaranteed to become ready. During live Sonarr tests, one release remained absent from TorrServer's list after the 120-second verification deadline on repeated attempts and stayed in bounded retry state. The importer surfaced this through warning messages instead of falsely marking the release imported. The notification delivery path worked for those warnings. A terminal failure path was also exercised with Radarr, and its critical notification arrived.
+
+The importer remains conservative: TorrServer membership and shared SQLite history are compared on each run, only verified additions enter successful import history, failures are logged and normal operation does not override a deliberate removal decision. Only the Radarr/Sonarr 1080p timers were validated as enabled and active; this status does not imply that either 4K timer is enabled.
