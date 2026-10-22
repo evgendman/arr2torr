@@ -22,17 +22,24 @@ This document records the current **torr-arr-importer v1.2.0** implementation se
 
 ## Validated so far
 
-- **Radarr live path:** multiple current Grabbed records imported into TorrServer with category and data.
-- **Idempotency:** a second normal run sees the hashes in TorrServer and adds none.
-- **Removal memory:** after a known hash is removed from TorrServer, a normal run skips it instead of restoring it.
-- **Rebuild:** a missing hash is added again when --rebuild is deliberately used.
-- **Incremental update:** a new Radarr Grab was observed in history and automatically imported on a subsequent timer cycle, including provider IDs.
-- **Sonarr history path:** records parse and duplicate hashes are recognized correctly; a dry-run with a hash already in TorrServer produced no candidate.
+- **Radarr live path (2026-10-22):** newly grabbed films were discovered on timer runs and added to TorrServer. Successful imports were confirmed by observable file metadata (`file-stats`); later ordinary runs skipped already-present or previously handled hashes. A larger batch also exercised the verification timeout and bounded retry paths.
+- **Sonarr live path (2026-10-22):** new Sonarr Grab records were discovered and processed under category `tv`. Several new series releases were accepted and confirmed by `file-stats`. One item remained absent from TorrServer's list beyond the 120-second verification deadline on repeated attempts, so it stayed in bounded retry state; this is a release-level verification failure, not a failure of the Sonarr integration path as a whole.
+- **Retry and terminal-failure handling:** a Radarr batch exhausted the configured three verification attempts for some items and produced both an aggregate `warnings` message and a grouped `critical` message.
+- **Live Apprise/Telegram delivery (2026-10-22):** five warning notifications (tag `warnings`) and one critical notification (tag `critical`) were delivered during the observed tests. Each was corroborated by `arr2torr` logging `APPRISE_SENT` with HTTP 200 and Apprise logging `Sent Telegram notification`, `Delivered Notification(s)`, and HTTP 200 for the corresponding `/notify/arr-stack` request.
+- **One earlier notification anomaly remains unresolved:** at 10:36:52, `arr2torr` logged `APPRISE_FAILED` with HTTP 424 and Apprise logged a Telegram connection error. The user reported receiving an importer warning after deployment, but its exact receipt time was not established well enough to correlate it conclusively with that request. No comparable failure occurred in the later observed deliveries from 11:55 to 13:07.
+- **Installed runtime (2026-10-22):** `/opt/torr-arr-importer/importer.py --version` returned `1.2.0`; the installed file compared byte-for-byte equal to the prepared v1.2.0 source. Both `torr-arr-importer@radarr-1080.timer` and `torr-arr-importer@sonarr-1080.timer` were enabled and active. Their oneshot services completed with `status=0/SUCCESS` on timer runs.
+- **Idempotency and safeguards:** previous Radarr checks confirmed that a normal run skips hashes already in TorrServer and does not automatically resurrect an intentionally removed, previously imported hash; rebuild remains explicit.
+- **Automation:** GitHub Actions passed both Python 3.11 and 3.12 jobs with 19 unit tests at commit `74ee8ac9a8a171be790b5cc314b888cf2e5e19f5`. Coverage includes compilation, notification aggregation/deduplication, terminal summaries, redaction, non-fatal Apprise errors and in-place migration of a v1.1.0 SQLite database.
 
-The last item is not the same as a complete live test of a **new** Sonarr Grab flowing into an initially missing TorrServer hash. That end-to-end case remains to be verified.
-- **Automation:** v1.1.0 had 12 unit tests. For v1.2.0, GitHub Actions passed both Python 3.11 and 3.12 matrix jobs with 19 unit tests at commit `74ee8ac9a8a171be790b5cc314b888cf2e5e19f5`; coverage includes compilation, count-only warning aggregation/deduplication, grouped terminal summaries, redaction, disabled-to-enabled notification delivery, non-fatal Apprise errors and in-place migration of a v1.1.0 SQLite database.
+## Live deployment validation (2026-10-22)
 
-## Deployment baseline and working version (2026-10-21)
+The v1.2.0 package is installed on MINI-Ubuntu and has been exercised through the live Radarr, Sonarr, TorrServer and Apprise integrations. Both configured 1080p timers are active. New film and series records have been submitted to TorrServer, and successful cases were confirmed by post-add verification rather than relying only on TorrServer's immediate `Torrent added` acknowledgement.
+
+Warnings and critical failure summaries have reached Telegram, with successful delivery logged at both the importer and Apprise layers. One earlier attempt returned HTTP 424 while Apprise logged a Telegram connection error; the exact relationship between that request and a warning the user remembers receiving is not conclusively established. Later warning and critical deliveries were all confirmed successful. Keep this as a monitored, isolated anomaly rather than claiming that the failure is either a proven lost message or a proven false-negative delivery result.
+
+The successful integration tests do not imply that every torrent will become ready. Individual releases can remain absent from TorrServer's list until the 120-second verification deadline and proceed through the configured bounded retries. This is surfaced through warning/critical notifications; it does not change the importer's rule that only verified additions enter successful import history.
+
+## Historical deployment baseline and working version (2026-10-21; superseded by the 2026-10-22 live verification above)
 
 **Version recorded as installed on MINI-Ubuntu:** torr-arr-importer **v1.1.0**, dated 2026-10-20, with the installed checkout recorded as commit **7831553da914b147d65989699b34a84c3ce238e5**. The current source file declares VERSION = "1.1.0"; the current installer also reports v1.1.0. The latest source history after the deployment record contains documentation updates; this does not itself prove that the live file on the host has not been changed manually. Run the on-host checks below before treating the installed file and enabled timers as freshly verified.
 
@@ -70,7 +77,7 @@ The v1.1.0 behavior already implemented and documented includes asynchronous ver
 
 ## Apprise notifications for retry and final transfer failures (implemented in v1.2.0, 2026-10-21)
 
-**Status: implemented in the repository; live deployment and validation on MINI-Ubuntu remain pending.** Follow the shared infrastructure contract in [media-server-tuning: notification contract](https://github.com/evgendman/media-server-tuning/blob/main/docs/notification-contract.md) and the actual tags in [Apprise notification routing](https://github.com/evgendman/media-server-tuning/blob/main/docs/apprise-notifications.md).
+**Status: implemented and live-validated on MINI-Ubuntu on 2026-10-22.** The live results are recorded in the validation section above. Follow the shared infrastructure contract in [media-server-tuning: notification contract](https://github.com/evgendman/media-server-tuning/blob/main/docs/notification-contract.md) and the actual tags in [Apprise notification routing](https://github.com/evgendman/media-server-tuning/blob/main/docs/apprise-notifications.md).
 
 ### Required behavior
 
@@ -108,7 +115,8 @@ The low-level HTTP/network options retry_count and retry_delay control request r
 - [x] Add a separate optional Arr UI base URL and best-effort /movie/<titleSlug> or /series/<titleSlug> links; omit links when unavailable.
 - [x] Add unit coverage for count-only warning aggregation/deduplication, grouped terminal failures, permanent preparation failure, UI link formatting, URL/hash redaction, disabled-to-enabled delivery, non-fatal Apprise outage and v1.1.0 SQLite migration.
 - [x] Assert interim warnings omit names and hashes while terminal alerts include the media/release context and optional link.
-- [x] Document notification configuration, upgrade safeguards and operations; CI passed on Python 3.11/3.12. Live deployment verification remains pending.
+- [x] Document notification configuration, upgrade safeguards and operations; CI passed on Python 3.11/3.12.
+- [x] Validate live warning and critical Telegram delivery on MINI-Ubuntu on 2026-10-22; correlate importer and Apprise logs.
 
 
 ## v1.2.0 implementation record (2026-10-21)
@@ -122,7 +130,7 @@ Implemented behavior:
 - In-place SQLite column migration; pre-existing `failed` rows are baselined to avoid a flood of stale notifications after upgrade.
 - Four configuration examples default to notifications disabled. The intended MINI-Ubuntu deployment will enable only `radarr-1080` and `sonarr-1080`, matching the last observed live timer state; 4K timers stay disabled.
 
-The GitHub Actions workflow passed on both Python 3.11 and 3.12 with 19 unit tests for source/test commit `74ee8ac9a8a171be790b5cc314b888cf2e5e19f5`. The deployed source should be pinned to this tested commit. Live deployment verification remains separate from CI and has not yet been performed on MINI-Ubuntu.
+The GitHub Actions workflow passed on both Python 3.11 and 3.12 with 19 unit tests for source/test commit `74ee8ac9a8a171be790b5cc314b888cf2e5e19f5`. Live deployment is now separately verified on MINI-Ubuntu; see the 2026-10-22 results above.
 
 ## Planned improvements
 
@@ -138,9 +146,9 @@ v1.0.3 reads the history quality, languages and customFormats fields but the cur
 
 Only non-secret, stable metadata should be stored. Credential-bearing downloadUrl and similar links must remain excluded.
 
-### 2. Complete end-to-end Sonarr validation
+### 2. Expand repeatable end-to-end Sonarr validation coverage
 
-Create a controlled new Sonarr Grab whose hash is absent from TorrServer. Confirm the timer sees it, resolves the download link, imports it under category tv, records the provider IDs, and skips it on the next ordinary cycle.
+A live new Sonarr Grab was confirmed on 2026-10-22: the timer discovered new series entries, sent them to TorrServer under category `tv`, and verified several successful additions using `file-stats`. One release timed out twice because it remained absent from the list; keep automated coverage for this failure and bounded-retry path, as well as successful import and next-run idempotency.
 
 ### 3. Make timer cadence easier to configure per instance
 
@@ -217,7 +225,7 @@ The importer already preserves provider IDs and selected Arr fields in TorrServe
 - Tested Radarr instance `radarr-1080` against TorrServer at `http://127.0.0.1:8092`.
 - TorrServer process reported MatriX.145 / torrent v1.2.31 and had been running since 2026-09-28 without a systemd restart (`NRestarts=0`).
 - The rebuild dry-run found 86 unique Grabbed hashes in Radarr history, 131 hashes in TorrServer, and 7 rebuild candidates. Rebuild was deliberately used; the shared importer DB was not cleared.
-- Diagnostic work stopped the `radarr-1080` and `sonarr-1080` timers. Before continuing, check their current state and inspect `pending_adds`; do not assume the timers were resumed.
+- At the time of this 2026-10-20 investigation, diagnostic work stopped the `radarr-1080` and `sonarr-1080` timers. This historical state was resolved on 2026-10-22: v1.2.0 was installed, both 1080p timers were verified active, and subsequent timer runs completed successfully.
 
 **Observed live results**
 
@@ -250,7 +258,7 @@ The importer already preserves provider IDs and selected Arr fields in TorrServe
 
 **Remaining actions**
 
-1. **Reconcile the prior diagnostic state before assuming normal scheduling.** The 2026-10-20 investigation stopped the `radarr-1080` and `sonarr-1080` timers and test scripts altered pending retry times. Confirm current timer state and inspect the relevant `pending_adds` rows before resuming or retrying anything. Preserve the `/tmp/arr2torr-*` backups; do not delete/reset `state.db`.
+1. **Preserve importer state during future diagnostics.** The earlier 2026-10-20 investigation stopped timers and manipulated test retry times; this was followed by a successful v1.2.0 deployment on 2026-10-22, when both 1080p timers were active. Preserve backups when relevant and do not delete/reset `state.db` merely to diagnose a single torrent.
 2. **Close the broad investigation of the original `All Good Things` release.** The alternative-release test provides the needed control evidence; do not run another broad `--rebuild`, restart TorrServer, or randomly toggle DHT/TCP/UTP for this case.
 3. **If the symptom recurs, test one release at a time.** Prefer a different release with independently credible swarm availability. If that known-good release also fails at metadata acquisition, reopen a focused investigation of tracker/DHT/network reachability and TorrServer runtime, recording exact timestamps and list/status results. Do not increase timeouts without evidence.
 4. **Handle `The Prestige` separately.** Its `HTTP 410` is a stale/unavailable Arr history download URL; re-grab or refresh the release in Radarr if still wanted. A TorrServer retry cannot repair a URL that fails before the add call.
