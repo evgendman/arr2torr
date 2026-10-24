@@ -326,5 +326,3 @@ The importer already preserves provider IDs and selected Arr fields in TorrServe
 - A Blackhole directory watcher: Blackhole permits Arr's Grab workflow, but the importer uses the Arr API and TorrServer API.
 - Downloading media inside the importer: TorrServer is the receiving/streaming service.
 - Silently resurrecting user-removed torrents during normal polling: rebuild must remain an explicit action.
-
-[executed on device: MINI-Ubuntu (5af1d950-cbcd-44f8-a387-d31d9aa5f0f7)]
