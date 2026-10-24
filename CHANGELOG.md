@@ -1,5 +1,14 @@
 # Changelog
 
+## torr-arr-importer v1.3.0
+
+- Add an opt-in Seerr Watchlist integration for terminal TorrServer transfer/verification failures; it creates a Watchlist attention marker only and does not create a media request or call Radarr/Sonarr.
+- Use the existing SQLite state DB and timers. Store separate Watchlist status/notification fields and migrate older databases in place without clearing import history.
+- Persist TMDb/TVDB IDs for permanent preparation failures when already available in Arr metadata; do not perform additional external ID lookups when an ID is missing.
+- Send grouped Apprise `warnings` notifications when a failed item is registered (or verified already present) in the administrator's Seerr Watchlist; send grouped `critical` failures when registration cannot be completed.
+- Add duplicate verification for Seerr HTTP 409, retries for transient API failures, deduplication of unchanged alerts, and API-key redaction.
+- Add tests for movie/series payloads, terminal failure selection, missing IDs, duplicate confirmation, retries, notification routing and state migration.
+
 ## torr-arr-importer v1.2.0
 
 - Add opt-in Apprise API notifications using the shared `arr-stack` configuration and tag-based routing; no direct Telegram credentials are stored by the importer.
