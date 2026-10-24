@@ -1184,8 +1184,8 @@ def dispatch_seerr_watchlist_notifications(cfg: Config, db: StateDB) -> None:
     warning_rows = db.seerr_watchlist_warning_rows(cfg.name)
     if warning_rows:
         intro = (
-            "Не удалось добавить медиа на TorrServer после исчерпания попыток. "
-            "Эти элементы зарегистрированы в Watchlist администратора Seerr для ручного контроля. "
+            "Передача этих медиа на TorrServer завершилась окончательной ошибкой. "
+            "Элементы зарегистрированы (или уже находились) в Watchlist администратора Seerr для контроля и разбирательства. "
             "Наличие в Watchlist не означает, что медиа уже доступно для просмотра."
         )
         for index, body in enumerate(_chunk_notification_lines(
