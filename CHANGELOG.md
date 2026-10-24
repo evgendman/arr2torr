@@ -1,3 +1,8 @@
+## torr-arr-importer v1.3.1
+
+- Fix a startup race when Radarr and Sonarr initialize the shared SQLite database concurrently. Schema migrations now acquire a write reservation before inspecting and altering table schemas.
+- Add a concurrent-initializer regression test for in-place migration of an existing v1.2 database. No state database reset or data deletion is required.
+
 # Changelog
 
 ## torr-arr-importer v1.3.0
@@ -48,3 +53,5 @@
 - Established the polling design from Arr Grabbed history to TorrServer.
 - Added shared persistent import history and the --rebuild escape hatch.
 - Added the initial systemd oneshot service/timer deployment pattern.
+
+[executed on device: MINI-Ubuntu (5af1d950-cbcd-44f8-a387-d31d9aa5f0f7)]
