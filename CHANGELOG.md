@@ -53,5 +53,3 @@
 - Established the polling design from Arr Grabbed history to TorrServer.
 - Added shared persistent import history and the --rebuild escape hatch.
 - Added the initial systemd oneshot service/timer deployment pattern.
-
-[executed on device: MINI-Ubuntu (5af1d950-cbcd-44f8-a387-d31d9aa5f0f7)]
