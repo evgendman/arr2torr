@@ -134,6 +134,61 @@ The GitHub Actions workflow passed on both Python 3.11 and 3.12 with 19 unit tes
 
 ## Planned improvements
 
+### 2. Register terminal TorrServer transfer failures in Seerr Watchlist
+
+**Status: planned. Implement as an opt-in feature of the existing arr2torr importer, not as a separate service.**
+
+**Goal**
+
+When an Arr release reaches a terminal transfer failure in TorrServer, place its movie or series in the administrator's Seerr Watchlist. This gives the user one UI in which to review media that needs manual attention, without creating a Seerr request or deliberately triggering another Radarr/Sonarr search. The Watchlist entry is an attention marker, not a retry or download request.
+
+**Configuration**
+
+- Add an opt-in setting (disabled by default) to the existing TOML configuration.
+- Add the Seerr base URL (scheme, host and port) and Seerr API key.
+- Reuse the existing arr2torr SQLite state database, timer/service, logging, HTTP timeout and Apprise configuration. Do not create a separate service, systemd timer, state database or database connection path.
+- Use the account associated with the API key. Seerr's API-key authentication defaults to administrator user ID 1 unless an explicit `X-API-User` header is supplied; this feature should omit that override and place all entries in the administrator's personal Watchlist.
+
+**Selection and API behavior**
+
+- Process only terminal TorrServer add/verification failures in `pending_adds` with `status = 'failed'`, scoped to the currently configured Arr instance/source. Do not process `pending` or `retry_wait` records.
+- Use the `tmdb_id` already persisted by arr2torr and the configured media type (`movie` for Radarr, `tv` for Sonarr). Do not perform a separate TMDb lookup or attempt ID conversion in this feature.
+- If `tmdb_id` is missing or invalid, do not call Seerr. Record a clear error/state and make the item visible in logs and an error notification.
+- Add films through `POST /api/v1/watchlist` with `tmdbId` and `mediaType: "movie"`. Add series with `tmdbId` and `mediaType: "tv"`; Seerr Watchlist is title-level, so add the whole series. Do not send season or episode fields.
+- A successful `201` response means the item was added. Do not perform a full Watchlist scan before every post.
+- Handle duplicate responses idempotently. A `409` must not automatically be treated as success, because Seerr can also return it for a database error. On `409` only, inspect the API-key user's Watchlist and confirm that the same media type and TMDb ID are already present before marking it as already registered.
+- Preserve the original TorrServer failure status. Store Watchlist processing in separate fields on the existing state row, for example `seerr_watchlist_status`, `seerr_watchlist_last_error`, and a notification/deduplication marker. Use an in-place SQLite migration; never repurpose `status`, retry counters or the existing Apprise notification markers.
+- Successful Watchlist registration must not change Arr monitoring, trigger searches, resend magnets or alter the existing bounded retry policy.
+
+**Notifications and logging**
+
+- Log each meaningful outcome with the Arr instance, media type/title and TMDb ID where available: added, already present, skipped due to missing ID, and failed. Never log the Seerr API key.
+- After successful addition, send a success notification through the existing Apprise integration, routed to tag `warnings` with informational/success semantics. Aggregate newly registered items per run where practical rather than sending one message for every release. Include the media title/type so the user knows what now needs attention in Seerr.
+- If Watchlist registration fails (including a missing TMDb ID), log the error and send an Apprise failure notification to tag `critical`, including the title when known and a short sanitized reason.
+- Persist notification/deduplication state so unchanged failures are not announced every timer run and successful items do not generate repeated success messages. Transient Seerr/network errors remain eligible for a later retry. Apprise delivery failure is logged locally and must not crash arr2torr or cause recursive notifications.
+- Reuse the existing Apprise URL, config key and tags from the current arr2torr configuration and shared notification contract. Keep Telegram destinations/topic IDs inside Apprise, not in arr2torr.
+
+**Manual API validation before implementation**
+
+- Send a manual `POST /api/v1/watchlist` for one known test film using the configured API key, then verify that it appears in the intended administrator's Watchlist in the Seerr UI.
+- Repeat the POST for the same film and record Seerr's exact duplicate response.
+- Test `GET /api/v1/user/1/watchlist` (including pagination if needed) to confirm how an existing item can be verified after a `409`. Do not rely on `409` alone as proof of duplicate success.
+- Repeat the add-and-view check for one test series, confirming it is added at series level.
+- Clean up test entries manually if appropriate; do not run these mutations against a real failed item without explicit selection.
+
+**Implementation and test checklist**
+
+- [ ] Validate manual Seerr API behavior (new item, duplicate item, reading Watchlist, and series).
+- [ ] Add opt-in Seerr URL/key settings and safe validation/redaction.
+- [ ] Add an in-place SQLite migration for separate per-failure Watchlist state and notification deduplication.
+- [ ] Select only `failed` pending-add rows for the active source and use their persisted TMDb ID; no ID conversion or external lookup.
+- [ ] Implement title-level movie/series Watchlist POSTs, and on `409` verify membership before treating it as an existing item.
+- [ ] Add grouped success notifications to Apprise `warnings` and error notifications to `critical`; deduplicate unchanged results and keep delivery failures non-fatal.
+- [ ] Add tests for status/source filtering, missing IDs, payload types, duplicate verification, retry after temporary API failure, notification deduplication, secret redaction and migration of an existing SQLite database.
+- [ ] Test `dry-run` behavior and a live one-film/one-series path before enabling it for the configured production instances.
+- [ ] Document settings, log events, Apprise routes, duplicate behavior and recovery/operations.
+
+
 ### 1. Preserve more useful Arr metadata
 
 v1.0.3 reads the history quality, languages and customFormats fields but the current TorrServer data payload does not persist those complete objects. Consider adding a carefully versioned and sanitized subset, for example:
@@ -146,19 +201,19 @@ v1.0.3 reads the history quality, languages and customFormats fields but the cur
 
 Only non-secret, stable metadata should be stored. Credential-bearing downloadUrl and similar links must remain excluded.
 
-### 2. Expand repeatable end-to-end Sonarr validation coverage
+### 3. Expand repeatable end-to-end Sonarr validation coverage
 
 A live new Sonarr Grab was confirmed on 2026-10-22: the timer discovered new series entries, sent them to TorrServer under category `tv`, and verified several successful additions using `file-stats`. One release timed out twice because it remained absent from the list; keep automated coverage for this failure and bounded-retry path, as well as successful import and next-run idempotency.
 
-### 3. Make timer cadence easier to configure per instance
+### 4. Make timer cadence easier to configure per instance
 
 The current template defaults all instances to five minutes. Systemd timer drop-ins can already override offsets/intervals, but the project should provide clear examples or a supported configuration scheme so four instances can be staggered without guesswork.
 
-### 4. Document and test clean-destination recovery
+### 5. Document and test clean-destination recovery
 
 --rebuild already implements the necessary behavior without deleting shared SQLite state. Add repeatable tests that cover replacing the TorrServer database while keeping importer history, then rebuilding each Arr source without duplicate adds.
 
-### 5. Add repeatable tests and recorded API fixtures
+### 6. Add repeatable tests and recorded API fixtures
 
 Add tests for:
 
@@ -177,7 +232,7 @@ Add tests for:
 - [x] concurrent pending-claim guard and retry-limit/backoff transitions;
 - transient vs permanent HTTP status handling.
 
-### 6. Verify asynchronous TorrServer adds before recording successful imports
+### 7. Verify asynchronous TorrServer adds before recording successful imports
 
 **Status: core implementation in v1.1.0; Python 3.11/3.12 CI passes. Live integration and additional failure-fixture coverage remain.**
 
@@ -211,11 +266,11 @@ TorrServer's `POST /torrents` `action=add` response is not necessarily proof tha
 - Ordinary retries remain idempotent; confirmed intentional removals are not resurrected.
 - Tests demonstrate both the successful readiness path and the “initial API acknowledgement, later metadata timeout” failure path.
 
-### 7. Coordinate with the downstream STRM/NFO project
+### 8. Coordinate with the downstream STRM/NFO project
 
 The importer already preserves provider IDs and selected Arr fields in TorrServer data, which supports a downstream library tree. The related torr2strm repository is currently private. When its public status and API are settled, document an end-to-end example showing Seerr request → Arr Grab → TorrServer → STRM/NFO library.
 
-### 8. Live integration investigation: TorrServer metadata-acquisition timeouts (2026-10-20)
+### 9. Live integration investigation: TorrServer metadata-acquisition timeouts (2026-10-20)
 
 **Status: narrowed by a successful alternative-release control test on 2026-10-21. The standard Arr → TorrServer → torr2strm → Jellyfin path works with the replacement release. The exact cause of the original release's failure remains unproven; no further broad investigation is planned unless the symptom recurs with a better-validated release.**
 
