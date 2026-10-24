@@ -64,6 +64,23 @@ Arr often focuses on the final chosen download in a conventional workflow. Howev
 
 That means different versions of one movie or series can coexist in TorrServer. The downstream library can expose each one as a distinct root with its own source identity and allow the viewer to choose.
 
+## Seerr Watchlist tracking (v1.3.0)
+
+When `seerr_watchlist_enabled = true`, the importer also processes terminal failures stored in `pending_adds` (`status = 'failed'`) and permanent `terminal_events` for the current Arr instance.
+
+Look for these log events:
+- `SEERR_WATCHLIST_ADDED`: added to the Seerr Watchlist.
+- `SEERR_WATCHLIST_ALREADY_PRESENT`: Seerr returned 409 and the exact local Watchlist entry was verified.
+- `SEERR_WATCHLIST_FAILED`: registration failed or the TMDb ID is missing.
+- `SEERR_WATCHLIST_SUMMARY`: per-run counts.
+
+Watchlist state is stored in extra columns in the existing SQLite database. Do not delete the state database to reset Watchlist behavior. A row already registered is skipped in later runs; retryable API errors are retried, but identical error notification fingerprints are deduplicated. The integration never uses the Seerr request endpoint and never deliberately triggers a Radarr/Sonarr search.
+
+Notifications:
+- The new `warnings` alert means TorrServer transfer reached terminal failure and the item is registered in the administrator's Seerr Watchlist for follow-up; it does **not** mean the item is available in Jellyfin.
+- The new `critical` alert means the importer could not register the failure in Seerr (for example, missing TMDb ID, bad API key or Seerr outage).
+- The original terminal transfer failure alert on `critical` remains unchanged; the Seerr warning is an additional status that confirms whether the failure is visible in the Watchlist.
+
 ## Why a release was not added
 
 Use the HISTORY and SNAPSHOT log lines first.
