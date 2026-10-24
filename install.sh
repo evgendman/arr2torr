@@ -17,7 +17,7 @@ fi
 
 # Add disabled Seerr Watchlist defaults to existing instance configs without
 # overwriting API keys or any other user-managed settings.
-for config in /etc/torr-arr-importer/*.toml; do
+for config in /etc/torr-arr-importer/radarr-1080.toml /etc/torr-arr-importer/sonarr-1080.toml; do
   [[ -f "$config" ]] || continue
   if ! grep -Eq '^[[:space:]]*seerr_watchlist_enabled[[:space:]]*=' "$config"; then
     cat >> "$config" <<'SEERR_CONFIG'
