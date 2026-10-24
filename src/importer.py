@@ -15,6 +15,7 @@ import logging
 import os
 import sqlite3
 import fcntl
+import hashlib
 import re
 import sys
 import time
@@ -27,7 +28,7 @@ from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 DEFAULT_PAGE_SIZE = 1000
 DEFAULT_TIMEOUT = 30
 
@@ -84,7 +85,7 @@ class Config:
     state_db: str
     history_page_size: int = DEFAULT_PAGE_SIZE
     timeout: int = DEFAULT_TIMEOUT
-    user_agent: str = "torr-arr-importer/1.2.0"
+    user_agent: str = "torr-arr-importer/1.3.0"
     log_level: str = "INFO"
     log_file: str = ""
     retry_count: int = 2
@@ -103,6 +104,9 @@ class Config:
     notification_timeout_sec: int = 5
     notification_tag_critical: str = "critical"
     notification_tag_warning: str = "warnings"
+    seerr_watchlist_enabled: bool = False
+    seerr_url: str = ""
+    seerr_api_key: str = ""
 
     def normalized(self) -> "Config":
         arr_type = self.arr_type.strip().lower()
@@ -130,7 +134,13 @@ class Config:
 
         arr_ui_url = self.arr_ui_url.strip().rstrip("/")
         apprise_url = self.apprise_url.strip().rstrip("/")
-        for label, value in (("arr_ui_url", arr_ui_url), ("apprise_url", apprise_url)):
+        seerr_url = self.seerr_url.strip().rstrip("/")
+        seerr_api_key = self.seerr_api_key.strip()
+        for label, value in (
+            ("arr_ui_url", arr_ui_url),
+            ("apprise_url", apprise_url),
+            ("seerr_url", seerr_url),
+        ):
             if not value:
                 continue
             parts = urlsplit(value)
@@ -153,9 +163,19 @@ class Config:
                 raise ValueError("apprise_config_key must contain only letters, digits, '_' or '-'")
             if not critical_tag or not warning_tag:
                 raise ValueError("notification tags must not be empty")
+        if self.seerr_watchlist_enabled:
+            if not seerr_url:
+                raise ValueError("seerr_url is required when seerr_watchlist_enabled=true")
+            if not seerr_api_key or seerr_api_key.lower() in {
+                "put_seerr_api_key_here", "changeme", "replace_me", "your_api_key"
+            }:
+                raise ValueError("seerr_api_key must contain a real key when seerr_watchlist_enabled=true")
+            if not self.notifications_enabled:
+                raise ValueError("notifications_enabled must be true when seerr_watchlist_enabled=true")
         return replace(
             self, arr_type=arr_type, category=category, lock_file=lock_file,
-            arr_ui_url=arr_ui_url, apprise_url=apprise_url,
+            arr_ui_url=arr_ui_url, apprise_url=apprise_url, seerr_url=seerr_url,
+            seerr_api_key=seerr_api_key,
             apprise_config_key=config_key, service_name=service_name,
             notification_tag_critical=critical_tag, notification_tag_warning=warning_tag,
         )
@@ -340,7 +360,12 @@ class StateDB:
                 last_status TEXT,
                 last_error TEXT,
                 next_retry_at TEXT,
-                notification_attempted_at TEXT
+                notification_attempted_at TEXT,
+                seerr_watchlist_status TEXT,
+                seerr_watchlist_last_error TEXT,
+                seerr_watchlist_error_fingerprint TEXT,
+                seerr_watchlist_error_notified_fingerprint TEXT,
+                seerr_watchlist_warning_notified_at TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_pending_source_status
                 ON pending_adds(source, status);
@@ -362,8 +387,15 @@ class StateDB:
                 attempt_count INTEGER,
                 max_attempts INTEGER,
                 reason TEXT NOT NULL,
+                tmdb_id TEXT,
+                tvdb_id TEXT,
                 created_at TEXT NOT NULL,
-                notification_attempted_at TEXT
+                notification_attempted_at TEXT,
+                seerr_watchlist_status TEXT,
+                seerr_watchlist_last_error TEXT,
+                seerr_watchlist_error_fingerprint TEXT,
+                seerr_watchlist_error_notified_fingerprint TEXT,
+                seerr_watchlist_warning_notified_at TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_terminal_events_source
                 ON terminal_events(source, notification_attempted_at);
@@ -378,10 +410,31 @@ class StateDB:
             "media_title": "TEXT",
             "title_slug": "TEXT",
             "notification_attempted_at": "TEXT",
+            "seerr_watchlist_status": "TEXT",
+            "seerr_watchlist_last_error": "TEXT",
+            "seerr_watchlist_error_fingerprint": "TEXT",
+            "seerr_watchlist_error_notified_fingerprint": "TEXT",
+            "seerr_watchlist_warning_notified_at": "TEXT",
         }
         for column, column_type in migrations.items():
             if column not in columns:
                 self.conn.execute(f"ALTER TABLE pending_adds ADD COLUMN {column} {column_type}")
+        terminal_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(terminal_events)").fetchall()
+        }
+        terminal_migrations = {
+            "tmdb_id": "TEXT",
+            "tvdb_id": "TEXT",
+            "seerr_watchlist_status": "TEXT",
+            "seerr_watchlist_last_error": "TEXT",
+            "seerr_watchlist_error_fingerprint": "TEXT",
+            "seerr_watchlist_error_notified_fingerprint": "TEXT",
+            "seerr_watchlist_warning_notified_at": "TEXT",
+        }
+        for column, column_type in terminal_migrations.items():
+            if column not in terminal_columns:
+                self.conn.execute(f"ALTER TABLE terminal_events ADD COLUMN {column} {column_type}")
         if added_notification_marker:
             # Suppress notifications for failures that predate this feature.
             self.conn.execute(
@@ -507,7 +560,12 @@ class StateDB:
                   last_status='request-started',
                   last_error=NULL,
                   next_retry_at=NULL,
-                  notification_attempted_at=NULL
+                  notification_attempted_at=NULL,
+                  seerr_watchlist_status=NULL,
+                  seerr_watchlist_last_error=NULL,
+                  seerr_watchlist_error_fingerprint=NULL,
+                  seerr_watchlist_error_notified_fingerprint=NULL,
+                  seerr_watchlist_warning_notified_at=NULL
                 """,
                 (
                     grab.hash, source, grab.history_id, grab.arr_media_id,
@@ -625,7 +683,12 @@ class StateDB:
                 UPDATE pending_adds
                 SET status = 'retry_wait', attempt_count = 0, next_retry_at = ?,
                     last_error = 'Manually re-queued with --retry-failed',
-                    notification_attempted_at = NULL
+                    notification_attempted_at = NULL,
+                    seerr_watchlist_status = NULL,
+                    seerr_watchlist_last_error = NULL,
+                    seerr_watchlist_error_fingerprint = NULL,
+                    seerr_watchlist_error_notified_fingerprint = NULL,
+                    seerr_watchlist_warning_notified_at = NULL
                 WHERE source = ? AND status = 'failed'
                 """,
                 (iso_now(), source),
@@ -644,6 +707,8 @@ class StateDB:
         title_slug: str | None,
         stage: str,
         reason: str,
+        tmdb_id: str | int | None = None,
+        tvdb_id: str | int | None = None,
     ) -> None:
         with self.conn:
             self.conn.execute(
@@ -651,12 +716,15 @@ class StateDB:
                 INSERT OR IGNORE INTO terminal_events
                   (event_key, source, arr_type, category, arr_media_id, media_title,
                    release_title, title_slug, stage, attempt_count, max_attempts,
-                   reason, created_at, notification_attempted_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL)
+                   reason, tmdb_id, tvdb_id, created_at, notification_attempted_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, NULL)
                 """,
                 (
                     event_key, source, arr_type, category, arr_media_id, media_title,
-                    release_title, title_slug, stage, reason[:1000], iso_now(),
+                    release_title, title_slug, stage, reason[:1000],
+                    str(tmdb_id).strip() if tmdb_id not in (None, "") else None,
+                    str(tvdb_id).strip() if tvdb_id not in (None, "") else None,
+                    iso_now(),
                 ),
             )
 
@@ -725,6 +793,118 @@ class StateDB:
                 """,
                 (state_key, fingerprint, iso_now()),
             )
+
+    def seerr_watchlist_candidates(self, source: str) -> list[dict[str, Any]]:
+        pending = self.conn.execute(
+            """
+            SELECT 'pending_adds' AS record_table, hash AS record_key, source,
+                   title AS release_title, media_title, tmdb_id, tvdb_id,
+                   seerr_watchlist_status, seerr_watchlist_last_error,
+                   seerr_watchlist_error_fingerprint,
+                   seerr_watchlist_error_notified_fingerprint,
+                   seerr_watchlist_warning_notified_at
+            FROM pending_adds
+            WHERE source = ? AND status = 'failed'
+            """,
+            (source,),
+        ).fetchall()
+        terminal = self.conn.execute(
+            """
+            SELECT 'terminal_events' AS record_table, event_key AS record_key, source,
+                   release_title, media_title, tmdb_id, tvdb_id,
+                   seerr_watchlist_status, seerr_watchlist_last_error,
+                   seerr_watchlist_error_fingerprint,
+                   seerr_watchlist_error_notified_fingerprint,
+                   seerr_watchlist_warning_notified_at
+            FROM terminal_events
+            WHERE source = ?
+            """,
+            (source,),
+        ).fetchall()
+        result = [dict(row) for row in [*pending, *terminal]]
+        result.sort(key=lambda row: str(row.get("record_key") or ""))
+        return result
+
+    def set_seerr_watchlist_state(
+        self,
+        record: dict[str, Any],
+        status: str,
+        *,
+        error: str | None = None,
+        error_fingerprint: str | None = None,
+        clear_notified_error: bool = False,
+    ) -> None:
+        table = str(record.get("record_table") or "")
+        if table == "pending_adds":
+            key_column = "hash"
+        elif table == "terminal_events":
+            key_column = "event_key"
+        else:
+            raise ValueError("Unknown Seerr Watchlist state table")
+        key = str(record.get("record_key") or "")
+        if not key:
+            raise ValueError("Missing Seerr Watchlist state key")
+        with self.conn:
+            self.conn.execute(
+                f"""
+                UPDATE {table}
+                SET seerr_watchlist_status = ?,
+                    seerr_watchlist_last_error = ?,
+                    seerr_watchlist_error_fingerprint = ?,
+                    seerr_watchlist_error_notified_fingerprint =
+                      CASE WHEN ? THEN NULL ELSE seerr_watchlist_error_notified_fingerprint END
+                WHERE {key_column} = ? AND source = ?
+                """,
+                (status, error[:1000] if error else None, error_fingerprint,
+                 1 if clear_notified_error else 0, key, str(record.get("source") or "")),
+            )
+
+    def seerr_watchlist_warning_rows(self, source: str) -> list[dict[str, Any]]:
+        return [
+            row for row in self.seerr_watchlist_candidates(source)
+            if row.get("seerr_watchlist_status") in {"added", "already_present"}
+            and not row.get("seerr_watchlist_warning_notified_at")
+        ]
+
+    def seerr_watchlist_error_rows(self, source: str) -> list[dict[str, Any]]:
+        return [
+            row for row in self.seerr_watchlist_candidates(source)
+            if row.get("seerr_watchlist_status") in {"error", "missing_tmdb_id"}
+            and row.get("seerr_watchlist_error_fingerprint")
+            and row.get("seerr_watchlist_error_fingerprint")
+                != row.get("seerr_watchlist_error_notified_fingerprint")
+        ]
+
+    def mark_seerr_watchlist_warnings_notified(self, records: list[dict[str, Any]]) -> None:
+        if not records:
+            return
+        now = iso_now()
+        with self.conn:
+            for record in records:
+                table = str(record.get("record_table") or "")
+                key_column = "hash" if table == "pending_adds" else "event_key" if table == "terminal_events" else ""
+                if not key_column:
+                    raise ValueError("Unknown Seerr Watchlist state table")
+                self.conn.execute(
+                    f"UPDATE {table} SET seerr_watchlist_warning_notified_at = ? "
+                    f"WHERE {key_column} = ? AND source = ?",
+                    (now, str(record.get("record_key") or ""), str(record.get("source") or "")),
+                )
+
+    def mark_seerr_watchlist_errors_notified(self, records: list[dict[str, Any]]) -> None:
+        if not records:
+            return
+        with self.conn:
+            for record in records:
+                table = str(record.get("record_table") or "")
+                key_column = "hash" if table == "pending_adds" else "event_key" if table == "terminal_events" else ""
+                if not key_column:
+                    raise ValueError("Unknown Seerr Watchlist state table")
+                self.conn.execute(
+                    f"UPDATE {table} SET seerr_watchlist_error_notified_fingerprint = seerr_watchlist_error_fingerprint "
+                    f"WHERE {key_column} = ? AND source = ?",
+                    (str(record.get("record_key") or ""), str(record.get("source") or "")),
+                )
 
     def close(self) -> None:
         self.conn.close()
@@ -801,6 +981,238 @@ def apprise_notify(cfg: Config, title: str, body: str, notify_type: str, tag: st
             cfg.name, tag, type(exc).__name__,
         )
     return False
+
+
+def seerr_error_fingerprint(error: str) -> str:
+    normalized = safe_notification_text(error, 800).lower()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def seerr_watchlist_contains(cfg: Config, client: HttpClient, tmdb_id: int, media_type: str) -> bool:
+    """Verify a 409 against the local Seerr Watchlist for administrator user ID 1."""
+    for page in range(1, 1001):
+        url = normalize_url(cfg.seerr_url, f"/api/v1/user/1/watchlist?page={page}")
+        response = client.request_json(
+            "GET", url, api_key=True,
+            retry_count=cfg.retry_count, retry_delay=cfg.retry_delay,
+        )
+        if not isinstance(response, dict) or not isinstance(response.get("results"), list):
+            raise ImporterError("Invalid response while verifying Seerr Watchlist duplicate")
+        for item in response["results"]:
+            if not isinstance(item, dict):
+                continue
+            requester = item.get("requestedBy")
+            requester_id = requester.get("id") if isinstance(requester, dict) else requester
+            if as_int(requester_id) != 1:
+                continue
+            if as_int(item.get("tmdbId")) == tmdb_id and str(
+                item.get("mediaType") or item.get("type") or ""
+            ).strip().lower() == media_type:
+                return True
+        total_pages = as_int(response.get("totalPages"))
+        if total_pages is not None:
+            if page >= max(1, total_pages):
+                break
+        elif not response["results"] or len(response["results"]) < 20:
+            break
+    else:
+        raise ImporterError("Seerr Watchlist duplicate verification exceeded 1000 pages")
+    return False
+
+
+def _seerr_watchlist_record_error(
+    cfg: Config, db: StateDB, record: dict[str, Any], status: str, error: str
+) -> None:
+    safe_error = safe_notification_text(error, 800)
+    fingerprint = seerr_error_fingerprint(safe_error)
+    unchanged = (
+        record.get("seerr_watchlist_status") == status
+        and record.get("seerr_watchlist_error_fingerprint") == fingerprint
+    )
+    db.set_seerr_watchlist_state(record, status, error=safe_error, error_fingerprint=fingerprint)
+    if not unchanged:
+        media_title = safe_notification_text(
+            record.get("media_title") or record.get("release_title") or "Неизвестный элемент", 160
+        )
+        logging.error(
+            "SEERR_WATCHLIST_FAILED source=%s type=%s title=%r tmdb=%s error=%s",
+            cfg.name, cfg.category, media_title, record.get("tmdb_id") or "missing", safe_error,
+        )
+    else:
+        logging.debug(
+            "SEERR_WATCHLIST_RETRY source=%s type=%s tmdb=%s status=%s",
+            cfg.name, cfg.category, record.get("tmdb_id") or "missing", status,
+        )
+
+
+def _seerr_watchlist_success(
+    cfg: Config, db: StateDB, record: dict[str, Any], status: str
+) -> None:
+    db.set_seerr_watchlist_state(
+        record, status, error=None, error_fingerprint=None, clear_notified_error=True,
+    )
+    logging.info(
+        "SEERR_WATCHLIST_%s source=%s type=%s title=%r tmdb=%s",
+        "ADDED" if status == "added" else "ALREADY_PRESENT",
+        cfg.name, cfg.category,
+        safe_notification_text(record.get("media_title") or record.get("release_title") or "Unknown", 160),
+        record.get("tmdb_id"),
+    )
+
+
+def process_seerr_watchlist(cfg: Config, db: StateDB) -> None:
+    """Mirror terminal TorrServer failures into the administrator's Seerr Watchlist."""
+    if not cfg.seerr_watchlist_enabled:
+        return
+    client = HttpClient(cfg.timeout, cfg.user_agent, api_key=cfg.seerr_api_key)
+    records = db.seerr_watchlist_candidates(cfg.name)
+    considered = added = already_present = errors = 0
+
+    for record in records:
+        status = str(record.get("seerr_watchlist_status") or "")
+        if status in {"added", "already_present"}:
+            continue
+        tmdb_id = as_int(record.get("tmdb_id"))
+        if tmdb_id is None or tmdb_id <= 0:
+            if status != "missing_tmdb_id":
+                _seerr_watchlist_record_error(
+                    cfg, db, record, "missing_tmdb_id",
+                    "TMDb ID is missing or invalid in arr2torr state; no external lookup was attempted",
+                )
+                errors += 1
+            continue
+
+        media_type = "tv" if cfg.category == "tv" else "movie"
+        considered += 1
+        try:
+            client.request_json(
+                "POST", normalize_url(cfg.seerr_url, "/api/v1/watchlist"),
+                payload={"tmdbId": tmdb_id, "mediaType": media_type},
+                api_key=True, retry_count=cfg.retry_count, retry_delay=cfg.retry_delay,
+            )
+        except HttpStatusError as exc:
+            if exc.code == 409:
+                try:
+                    present = seerr_watchlist_contains(cfg, client, tmdb_id, media_type)
+                except Exception as verify_error:
+                    _seerr_watchlist_record_error(
+                        cfg, db, record, "error",
+                        f"HTTP 409 from Seerr; duplicate verification failed: {verify_error}",
+                    )
+                    errors += 1
+                    continue
+                if present:
+                    _seerr_watchlist_success(cfg, db, record, "already_present")
+                    already_present += 1
+                    continue
+                _seerr_watchlist_record_error(
+                    cfg, db, record, "error",
+                    f"HTTP 409 from Seerr but exact item was not found in the administrator Watchlist: {exc.body}",
+                )
+                errors += 1
+                continue
+            _seerr_watchlist_record_error(cfg, db, record, "error", f"Seerr POST failed: {exc}")
+            errors += 1
+            continue
+        except Exception as exc:
+            _seerr_watchlist_record_error(cfg, db, record, "error", f"Seerr POST failed: {exc}")
+            errors += 1
+            continue
+
+        _seerr_watchlist_success(cfg, db, record, "added")
+        added += 1
+
+    logging.info(
+        "SEERR_WATCHLIST_SUMMARY source=%s candidates=%d requests=%d added=%d already_present=%d errors=%d",
+        cfg.name, len(records), considered, added, already_present, errors,
+    )
+    dispatch_seerr_watchlist_notifications(cfg, db)
+
+
+def _seerr_watchlist_lines(records: list[dict[str, Any]], cfg: Config, *, errors: bool = False) -> list[str]:
+    grouped: dict[tuple[str, int | None], dict[str, Any]] = {}
+    for record in records:
+        tmdb_id = as_int(record.get("tmdb_id"))
+        key = (cfg.category, tmdb_id)
+        item = grouped.setdefault(key, {"titles": [], "releases": [], "statuses": [], "errors": []})
+        title = str(record.get("media_title") or record.get("release_title") or "Неизвестный элемент")
+        if title not in item["titles"]:
+            item["titles"].append(title)
+        release = str(record.get("release_title") or "")
+        if release and release not in item["releases"]:
+            item["releases"].append(release)
+        item["statuses"].append(str(record.get("seerr_watchlist_status") or ""))
+        error = str(record.get("seerr_watchlist_last_error") or "")
+        if error and error not in item["errors"]:
+            item["errors"].append(error)
+
+    lines: list[str] = []
+    media_label = "Сериал" if cfg.category == "tv" else "Фильм"
+    for (_media_type, tmdb_id), item in grouped.items():
+        title = safe_notification_text(item["titles"][0], 150)
+        suffix = f" (TMDb {tmdb_id})" if tmdb_id else ""
+        if errors:
+            reason = safe_notification_text(item["errors"][0] if item["errors"] else "неизвестная ошибка", 220)
+            lines.append(f"• {media_label}: {title}{suffix} — не удалось зарегистрировать в Watchlist Seerr: {reason}")
+        else:
+            states = set(item["statuses"])
+            where = "уже находился" if states == {"already_present"} else "добавлен или уже находился"
+            releases = "; ".join(safe_notification_text(v, 100) for v in item["releases"][:2])
+            extra = f"; раздача: {releases}" if releases else ""
+            lines.append(f"• {media_label}: {title}{suffix} — {where} в Watchlist администратора Seerr{extra}")
+    return lines
+
+
+def _chunk_notification_lines(intro: str, lines: list[str], limit: int = 3000) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+    for line in lines:
+        candidate = intro + "\n\n" + "\n".join(current + [line])
+        if current and len(candidate) > limit:
+            chunks.append(intro + "\n\n" + "\n".join(current))
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        chunks.append(intro + "\n\n" + "\n".join(current))
+    return chunks
+
+
+def dispatch_seerr_watchlist_notifications(cfg: Config, db: StateDB) -> None:
+    if not cfg.notifications_enabled:
+        return
+    warning_rows = db.seerr_watchlist_warning_rows(cfg.name)
+    if warning_rows:
+        intro = (
+            "Не удалось добавить медиа на TorrServer после исчерпания попыток. "
+            "Эти элементы зарегистрированы в Watchlist администратора Seerr для ручного контроля. "
+            "Наличие в Watchlist не означает, что медиа уже доступно для просмотра."
+        )
+        for index, body in enumerate(_chunk_notification_lines(
+            intro, _seerr_watchlist_lines(warning_rows, cfg)
+        ), start=1):
+            suffix = f" ({index})" if len(warning_rows) > 1 else ""
+            apprise_notify(
+                cfg, f"{cfg.service_name} — Сбой TorrServer зарегистрирован в Seerr{suffix}",
+                body, "warning", cfg.notification_tag_warning,
+            )
+        db.mark_seerr_watchlist_warnings_notified(warning_rows)
+
+    error_rows = db.seerr_watchlist_error_rows(cfg.name)
+    if error_rows:
+        intro = (
+            "arr2torr не смог зарегистрировать окончательный сбой TorrServer в Watchlist Seerr. "
+            "Элемент требует проверки конфигурации, идентификатора или доступности Seerr."
+        )
+        for index, body in enumerate(_chunk_notification_lines(
+            intro, _seerr_watchlist_lines(error_rows, cfg, errors=True)
+        ), start=1):
+            suffix = f" ({index})" if len(error_rows) > 1 else ""
+            apprise_notify(
+                cfg, f"{cfg.service_name} — Ошибка регистрации в Seerr{suffix}",
+                body, "failure", cfg.notification_tag_critical,
+            )
+        db.mark_seerr_watchlist_errors_notified(error_rows)
 
 
 def retry_warning_fingerprint(rows: list[dict[str, Any]]) -> tuple[str, str]:
@@ -1319,6 +1731,8 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                         title_slug=str(media_for_error.get("titleSlug") or "") or None,
                         stage="prepare",
                         reason=str(exc),
+                        tmdb_id=media_for_error.get("tmdbId"),
+                        tvdb_id=media_for_error.get("tvdbId"),
                     )
                 continue
 
@@ -1459,6 +1873,8 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
             time.sleep(sleep_for)
 
         dispatch_notifications(cfg, db)
+        if cfg.seerr_watchlist_enabled:
+            process_seerr_watchlist(cfg, db)
         pending_count = len(db.pending_rows())
         logging.info(
             "DONE source=%s candidates=%d submitted=%d added=%d failed=%d pending=%d "
@@ -1495,7 +1911,7 @@ def config_from_file(path: str) -> Config:
         state_db=str(raw.get("state_db", "/var/lib/torr-arr-importer/state.db")),
         history_page_size=int(raw.get("history_page_size", DEFAULT_PAGE_SIZE)),
         timeout=int(raw.get("timeout", DEFAULT_TIMEOUT)),
-        user_agent=str(raw.get("user_agent", "torr-arr-importer/1.2.0")),
+        user_agent=str(raw.get("user_agent", "torr-arr-importer/1.3.0")),
         log_level=str(raw.get("log_level", "INFO")).upper(),
         log_file=str(raw.get("log_file", "")),
         retry_count=int(raw.get("retry_count", 2)),
@@ -1514,6 +1930,9 @@ def config_from_file(path: str) -> Config:
         notification_timeout_sec=int(raw.get("notification_timeout_sec", 5)),
         notification_tag_critical=str(raw.get("notification_tag_critical", "critical")),
         notification_tag_warning=str(raw.get("notification_tag_warning", "warnings")),
+        seerr_watchlist_enabled=bool(raw.get("seerr_watchlist_enabled", False)),
+        seerr_url=str(raw.get("seerr_url", "")),
+        seerr_api_key=str(raw.get("seerr_api_key", "")),
     )
     return cfg.normalized()
 
