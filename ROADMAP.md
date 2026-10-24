@@ -136,7 +136,7 @@ The GitHub Actions workflow passed on both Python 3.11 and 3.12 with 19 unit tes
 
 ### 1. Register terminal TorrServer transfer failures in Seerr Watchlist
 
-**Status: planned. Implement as an opt-in feature of the existing arr2torr importer, not as a separate service.**
+**Status: implemented in v1.3.0; 27 unit tests pass. Live Seerr API validation and production activation remain pending until a real API key is configured.**
 
 **Goal**
 
