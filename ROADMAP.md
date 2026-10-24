@@ -1,6 +1,6 @@
 # Roadmap
 
-This document records the current **torr-arr-importer v1.2.0** implementation separately from remaining work and live validation.
+This document records the current **torr-arr-importer v1.3.1** implementation separately from remaining work and live validation.
 
 ## Implemented
 
@@ -136,7 +136,7 @@ The GitHub Actions workflow passed on both Python 3.11 and 3.12 with 19 unit tes
 
 ### 1. Register terminal TorrServer transfer failures in Seerr Watchlist
 
-**Status: implemented in v1.3.0; 28 unit tests pass. Live Seerr API validation and production activation remain pending until a real API key is configured.**
+**Status: implemented in v1.3.0; 29 unit tests pass after the v1.3.1 concurrent-migration fix. Live Seerr API validation and production activation remain pending until a real API key is configured.**
 
 **Goal**
 
@@ -326,3 +326,5 @@ The importer already preserves provider IDs and selected Arr fields in TorrServe
 - A Blackhole directory watcher: Blackhole permits Arr's Grab workflow, but the importer uses the Arr API and TorrServer API.
 - Downloading media inside the importer: TorrServer is the receiving/streaming service.
 - Silently resurrecting user-removed torrents during normal polling: rebuild must remain an explicit action.
+
+[executed on device: MINI-Ubuntu (5af1d950-cbcd-44f8-a387-d31d9aa5f0f7)]
