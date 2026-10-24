@@ -4,7 +4,7 @@
 
 arr2torr is the project and documentation home for **torr-arr-importer**, a polling service that transfers releases selected with **Grab** in Radarr or Sonarr directly to the TorrServer API. It is intended for a media workflow where the user wants to start streaming from TorrServer, then expose those streams to a media library through STRM files or another integration.
 
-The current implementation described here is **torr-arr-importer v1.2.0**.
+The current implementation described here is **torr-arr-importer v1.3.0**.
 
 ## Why this exists
 
@@ -84,6 +84,20 @@ Default verification settings are verification_timeout_sec = 120, verification_p
 Notifications are opt-in through the shared Apprise API; the importer does not store Telegram tokens, chat IDs or topic IDs. For eligible instances, numeric-only warnings are sent when the retry-wait count or attempt distribution changes. When an item reaches a terminal failure, the importer groups newly failed items into a critical message containing the movie/series title, release title if available, attempts used, a sanitized reason and an optional direct Arr card link when `arr_ui_url` and Arr's `titleSlug` are available.
 
 Notification state is stored in the existing SQLite database to avoid repeating the same warnings or terminal alerts on every timer run. Apprise calls use a bounded timeout, are attempted at most once for a terminal group, and never change the import result. Notifications default to disabled in configuration examples. See [Installation and configuration](docs/INSTALLATION.md) and [Operations](docs/OPERATIONS.md).
+
+## Seerr Watchlist for terminal transfer failures (v1.3.0)
+
+The optional Seerr integration registers a movie or whole series in the administrator's personal Seerr Watchlist after a TorrServer transfer reaches terminal failure. It is an attention marker for manual review, **not** a Seerr media request: it does not ask Seerr to search/download the title and does not deliberately change Radarr/Sonarr monitoring or trigger their search commands.
+
+- Controlled by `seerr_watchlist_enabled`, which defaults to `false`.
+- Requires `seerr_url` and `seerr_api_key`. API-key requests use Seerr's administrator account (user ID 1) unless an explicit user override is sent; this integration does not send one.
+- Reads terminal `failed` rows from `pending_adds` and permanent `terminal_events` for the current Arr instance. `pending` and `retry_wait` are ignored.
+- Uses only the TMDb ID already stored in arr2torr. Missing IDs are recorded and reported; there is no separate metadata lookup.
+- Success/verified-existing items produce a grouped Apprise `warnings` message explaining that the TorrServer transfer failed and the item is tracked in Seerr for troubleshooting. Failure to register it produces an Apprise `critical` message.
+- Watchlist processing state is stored in additional SQLite columns and is migrated in place. The import history and original TorrServer failure state remain intact.
+- The success notification is not an availability notification: a Watchlist item is **not necessarily available to watch**.
+
+The setting is off in all example configs until a real key is supplied and the operator enables it. Configure only the two active 1080p profiles unless the 4K instances are intentionally brought into use.
 
 ## What it deliberately does not do
 
@@ -171,7 +185,7 @@ The current stored data subset includes source instance name, media type, target
 - [Roadmap and validation status](ROADMAP.md)
 - [Version history](CHANGELOG.md)
 
-The current code package is **torr-arr-importer v1.2.0**. It uses Python 3.11+ and the standard library; it does not require external Python packages.
+The current code package is **torr-arr-importer v1.3.0**. It uses Python 3.11+ and the standard library; it does not require external Python packages.
 
 ## Related project: STRM/NFO library generation
 
@@ -181,7 +195,7 @@ The current code package is **torr-arr-importer v1.2.0**. It uses Python 3.11+ a
 
 Version **1.2.0 is installed and live-validated on MINI-Ubuntu** (2026-10-22). Both configured 1080p timer instances—Radarr and Sonarr—completed live runs successfully. New movie and series Grab records were transferred to TorrServer; successful additions were confirmed by post-add verification using observable file metadata, and later ordinary runs skipped hashes already present or previously handled.
 
-The v1.2.0 Apprise notification flow has also been exercised end to end. Warning messages and a grouped critical message were received in Telegram. For five warning sends and one critical send observed on 2026-10-22, the importer logged `APPRISE_SENT` with HTTP 200, and Apprise logged `Sent Telegram notification`, `Delivered Notification(s)` and HTTP 200. One earlier send at 10:36:52 logged HTTP 424 and a Telegram connection error; the exact relationship to a warning the user reports receiving could not be conclusively matched by timestamp. Subsequent observed sends succeeded.
+The existing v1.2.0 Apprise notification flow was exercised end to end; v1.3.0 adds the opt-in Seerr Watchlist path and requires live API validation after a real Seerr key is configured. Warning messages and a grouped critical message were received in Telegram. For five warning sends and one critical send observed on 2026-10-22, the importer logged `APPRISE_SENT` with HTTP 200, and Apprise logged `Sent Telegram notification`, `Delivered Notification(s)` and HTTP 200. One earlier send at 10:36:52 logged HTTP 424 and a Telegram connection error; the exact relationship to a warning the user reports receiving could not be conclusively matched by timestamp. Subsequent observed sends succeeded.
 
 Not every torrent is guaranteed to become ready. During live Sonarr tests, one release remained absent from TorrServer's list after the 120-second verification deadline on repeated attempts and stayed in bounded retry state. The importer surfaced this through warning messages instead of falsely marking the release imported. The notification delivery path worked for those warnings. A terminal failure path was also exercised with Radarr, and its critical notification arrived.
 
