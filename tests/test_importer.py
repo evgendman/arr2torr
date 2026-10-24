@@ -432,6 +432,58 @@ class SeerrWatchlistTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "real key"):
                 importer.replace(valid, seerr_api_key="PUT_SEERR_API_KEY_HERE").normalized()
 
+    def test_existing_terminal_events_schema_migrates_in_place(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            conn = importer.sqlite3.connect(str(db_path))
+            conn.executescript(
+                """
+                CREATE TABLE terminal_events (
+                    event_key TEXT PRIMARY KEY,
+                    source TEXT NOT NULL,
+                    arr_type TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    arr_media_id INTEGER,
+                    media_title TEXT,
+                    release_title TEXT,
+                    title_slug TEXT,
+                    stage TEXT NOT NULL,
+                    attempt_count INTEGER,
+                    max_attempts INTEGER,
+                    reason TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    notification_attempted_at TEXT
+                );
+                INSERT INTO terminal_events
+                  (event_key, source, arr_type, category, media_title, release_title,
+                   stage, reason, created_at)
+                VALUES ('legacy-event', 'radarr-1080', 'radarr', 'movie',
+                        'Legacy Movie', 'Legacy.Release', 'prepare', 'old failure',
+                        '2026-10-20T12:00:00+00:00');
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            db = importer.StateDB(str(db_path))
+            columns = {
+                row["name"]
+                for row in db.conn.execute("PRAGMA table_info(terminal_events)").fetchall()
+            }
+            for column in (
+                "tmdb_id", "tvdb_id", "seerr_watchlist_status",
+                "seerr_watchlist_error_fingerprint",
+                "seerr_watchlist_error_notified_fingerprint",
+                "seerr_watchlist_warning_notified_at",
+            ):
+                self.assertIn(column, columns)
+            legacy = db.conn.execute(
+                "SELECT media_title, reason FROM terminal_events WHERE event_key='legacy-event'"
+            ).fetchone()
+            self.assertEqual(legacy["media_title"], "Legacy Movie")
+            self.assertEqual(legacy["reason"], "old failure")
+            db.close()
+
     def test_movie_post_adds_once_and_sends_warning_to_warnings_tag(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self.make_seerr_config(Path(tmp))
