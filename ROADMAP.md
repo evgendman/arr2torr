@@ -136,7 +136,7 @@ The GitHub Actions workflow passed on both Python 3.11 and 3.12 with 19 unit tes
 
 ### 1. Register terminal TorrServer transfer failures in Seerr Watchlist
 
-**Status: planned. Implement as an opt-in feature of the existing arr2torr importer, not as a separate service.**
+**Status: implemented in v1.3.0; 28 unit tests pass. Live Seerr API validation and production activation remain pending until a real API key is configured.**
 
 **Goal**
 
@@ -169,7 +169,7 @@ When an Arr release reaches a terminal transfer failure in TorrServer, place its
 - Persist notification/deduplication state so the same terminal failure is not announced on every timer run. Transient Seerr/network errors remain eligible for a later retry. Apprise delivery failure is logged locally and must not crash arr2torr or cause recursive notifications.
 - Reuse the existing Apprise URL, config key and `notification_tag_warning` / `notification_tag_critical` settings from the current arr2torr configuration and shared notification contract. Route Watchlist-confirmed terminal transfer failures to `warnings` with type `warning`; route failures to register the item in Seerr (including missing/invalid TMDb ID) to `critical` with type `failure`. Keep Telegram destinations/topic IDs inside Apprise, not in arr2torr.
 
-**Manual API validation before implementation**
+**Manual API validation before production activation**
 
 - Send a manual `POST /api/v1/watchlist` for one known test film using the configured API key, then verify that it appears in the intended administrator's Watchlist in the Seerr UI.
 - Repeat the POST for the same film and record Seerr's exact duplicate response.
@@ -180,14 +180,14 @@ When an Arr release reaches a terminal transfer failure in TorrServer, place its
 **Implementation and test checklist**
 
 - [ ] Validate manual Seerr API behavior (new item, duplicate item, reading Watchlist, and series).
-- [ ] Add opt-in Seerr URL/key settings and safe validation/redaction.
-- [ ] Add in-place SQLite migrations for separate per-failure Watchlist state and notification deduplication on both `pending_adds` and `terminal_events`; add provider-ID fields to `terminal_events` and populate them for new events where Arr details are available.
-- [ ] Select `failed` pending-add rows and permanent `terminal_events` for the active source; use persisted TMDb IDs only, with no ID conversion or external lookup.
-- [ ] Implement title-level movie/series Watchlist POSTs, and on `409` verify membership before treating it as an existing item.
-- [ ] Add grouped warnings to Apprise `warnings` (type `warning`) explaining that the TorrServer transfer failed and the item is now in the administrator's Seerr Watchlist; send `critical` (type `failure`) notifications if Watchlist registration itself fails. Deduplicate by terminal-failure record and keep delivery failures non-fatal.
-- [ ] Add tests for status/source filtering, missing IDs, payload types, duplicate verification, retry after temporary API failure, notification deduplication, secret redaction and migration of an existing SQLite database.
+- [x] Add opt-in Seerr URL/key settings and safe validation/redaction.
+- [x] Add in-place SQLite migrations for separate per-failure Watchlist state and notification deduplication on both `pending_adds` and `terminal_events`; add provider-ID fields to `terminal_events` and populate them for new events where Arr details are available.
+- [x] Select `failed` pending-add rows and permanent `terminal_events` for the active source; use persisted TMDb IDs only, with no ID conversion or external lookup.
+- [x] Implement title-level movie/series Watchlist POSTs, and on `409` verify membership before treating it as an existing item.
+- [x] Add grouped warnings to Apprise `warnings` (type `warning`) explaining that the TorrServer transfer failed and the item is now in the administrator's Seerr Watchlist; send `critical` (type `failure`) notifications if Watchlist registration itself fails. Deduplicate by terminal-failure record and keep delivery failures non-fatal.
+- [x] Add tests for status/source filtering, missing IDs, payload types, duplicate verification, retry after temporary API failure, notification deduplication, secret redaction and migration of an existing SQLite database.
 - [ ] Test `dry-run` behavior and a live one-film/one-series path before enabling it for the configured production instances.
-- [ ] Document settings, log events, Apprise routes, duplicate behavior and recovery/operations.
+- [x] Document settings, log events, Apprise routes, duplicate behavior and recovery/operations.
 
 
 ### 2. Preserve more useful Arr metadata

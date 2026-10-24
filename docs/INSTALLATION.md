@@ -1,6 +1,6 @@
 # Installation and configuration
 
-The instructions below describe the v1.2.0 systemd deployment used on the Ubuntu media server. The four-instance examples are intended to be adapted to the actual addresses, ports and API keys in your installation.
+The instructions below describe the v1.3.0 systemd deployment and its optional Seerr Watchlist integration. The four-instance examples are intended to be adapted to the actual addresses, ports and API keys in your installation.
 
 ## Requirements
 
@@ -173,6 +173,53 @@ Behavior:
 - The fingerprint for retry warnings and the one-time terminal-notification marker live in the shared SQLite database. Existing `failed` rows present before the v1.2.0 migration are baselined so an upgrade does not dump old failures into Telegram.
 - An Apprise outage is logged locally only; the importer does not fail solely because notification delivery failed and does not retry the same terminal alert indefinitely.
 
+
+## Optional Seerr Watchlist integration (v1.3.0)
+
+This feature is disabled by default. Add these flat TOML keys to the existing Radarr/Sonarr profile that should register terminal failures in Seerr:
+
+    seerr_watchlist_enabled = false
+    seerr_url = "http://192.168.0.14:5055"
+    seerr_api_key = "PUT_SEERR_API_KEY_HERE"
+
+Replace the placeholder key locally; never commit an actual key or put it in logs. The Watchlist is personal, so the API-key request targets the administrator account (Seerr user ID 1). Do not add `X-API-User` to override it.
+
+For the current MINI-Ubuntu setup, only edit:
+- `/etc/torr-arr-importer/radarr-1080.toml`
+- `/etc/torr-arr-importer/sonarr-1080.toml`
+
+Both files should keep `seerr_watchlist_enabled = false` until the real API key has been saved and the feature is ready for activation. Enable by changing the value to `true` in those two files only. Keep 4K profiles disabled unless explicitly required.
+
+When enabled, the importer selects only terminal `failed` rows for the current Arr instance and adds their existing TMDb IDs to `POST /api/v1/watchlist`. Series are registered as a whole title. Missing IDs are reported rather than looked up externally. The feature does not create a Seerr media request, intentionally alter Arr monitoring, or initiate a second Arr search.
+
+Notifications reuse the existing Apprise config:
+- After a failure is represented in Watchlist (including a duplicate whose presence is verified), send type `warning` to tag `warnings`. Explain that TorrServer transfer failed and the item is listed in the administrator's Seerr Watchlist for manual investigation; this is not a media-available notice.
+- If registration itself fails, send type `failure` to tag `critical`.
+- Watchlist state and notification fingerprints are stored in the existing SQLite database. API/network errors can retry on later timer runs; unchanged error alerts are deduplicated.
+
+### Safe activation sequence
+
+1. Stop only the two currently used timers before changing the live configuration:
+
+       sudo systemctl stop torr-arr-importer@radarr-1080.timer torr-arr-importer@sonarr-1080.timer
+       while systemctl is-active --quiet torr-arr-importer@radarr-1080.service || systemctl is-active --quiet torr-arr-importer@sonarr-1080.service; do sleep 1; done
+
+2. Edit the two files and replace the placeholder API key. Set `seerr_watchlist_enabled = true` in each file only after entering the real key:
+
+       sudo nano /etc/torr-arr-importer/radarr-1080.toml
+       sudo nano /etc/torr-arr-importer/sonarr-1080.toml
+
+3. Validate config parsing without triggering a transfer by running `--dry-run`. Since the Seerr feature is disabled from all dry-run side effects, no Watchlist entries or notifications are created:
+
+       sudo -u torrimport /opt/torr-arr-importer/importer.py --config /etc/torr-arr-importer/radarr-1080.toml --dry-run
+       sudo -u torrimport /opt/torr-arr-importer/importer.py --config /etc/torr-arr-importer/sonarr-1080.toml --dry-run
+
+4. Before restarting timers, manually validate the Seerr API with one selected test item (a disposable movie is preferred): confirm `POST /api/v1/watchlist` returns 201 and the item appears in the administrator profile. Repeat the POST to observe the duplicate response, then verify `GET /api/v1/user/1/watchlist?page=1` distinguishes a local Seerr Watchlist entry. Remove the disposable item in Seerr when done. Repeat with a test series if needed. Do not use a genuine failed production item as a test unless explicitly selected.
+
+5. Once the real key and the API behavior are verified, start the same two timers again. Do not enable the 4K timers:
+
+       sudo systemctl start torr-arr-importer@radarr-1080.timer torr-arr-importer@sonarr-1080.timer
+       systemctl list-timers 'torr-arr-importer@*' --all --no-pager
 
 ## 3. Dry-run before enabling the timer
 

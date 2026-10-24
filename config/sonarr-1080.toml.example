@@ -30,3 +30,8 @@ service_name = "arr2torr / Sonarr 1080p"
 notification_timeout_sec = 5
 notification_tag_critical = "critical"
 notification_tag_warning = "warnings"
+
+# Seerr Watchlist integration: disabled until a real API key is entered.
+seerr_watchlist_enabled = false
+seerr_url = "http://192.168.0.14:5055"
+seerr_api_key = "PUT_SEERR_API_KEY_HERE"
