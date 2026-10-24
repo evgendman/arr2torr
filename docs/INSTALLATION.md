@@ -1,6 +1,6 @@
 # Installation and configuration
 
-The instructions below describe the v1.3.0 systemd deployment and its optional Seerr Watchlist integration. The four-instance examples are intended to be adapted to the actual addresses, ports and API keys in your installation.
+The instructions below describe the v1.3.1 systemd deployment and its optional Seerr Watchlist integration. The four-instance examples are intended to be adapted to the actual addresses, ports and API keys in your installation.
 
 ## Requirements
 

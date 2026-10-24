@@ -1,5 +1,6 @@
 import json
 import sys
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -282,6 +283,74 @@ class BatchVerificationTests(unittest.TestCase):
 
 
 class StateMigrationTests(unittest.TestCase):
+    def test_concurrent_initializers_serialize_schema_migrations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            conn = importer.sqlite3.connect(str(db_path))
+            conn.executescript(
+                """
+                CREATE TABLE imports (
+                    hash TEXT PRIMARY KEY, imported_at TEXT NOT NULL, source TEXT NOT NULL,
+                    arr_history_id INTEGER, arr_media_id INTEGER, download_id TEXT, title TEXT,
+                    imdb_id TEXT, tmdb_id TEXT, tvdb_id TEXT
+                );
+                CREATE INDEX idx_imports_source ON imports(source);
+                CREATE TABLE pending_adds (
+                    hash TEXT PRIMARY KEY, source TEXT NOT NULL, arr_history_id INTEGER,
+                    arr_media_id INTEGER, download_id TEXT, title TEXT, imdb_id TEXT,
+                    tmdb_id TEXT, tvdb_id TEXT, requested_at TEXT NOT NULL,
+                    deadline_at TEXT NOT NULL, attempt_count INTEGER NOT NULL DEFAULT 1,
+                    status TEXT NOT NULL DEFAULT 'pending', last_checked_at TEXT,
+                    last_status TEXT, last_error TEXT, next_retry_at TEXT,
+                    notification_attempted_at TEXT
+                );
+                CREATE INDEX idx_pending_source_status ON pending_adds(source, status);
+                CREATE TABLE notification_state (
+                    state_key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE terminal_events (
+                    event_key TEXT PRIMARY KEY, source TEXT NOT NULL, arr_type TEXT NOT NULL,
+                    category TEXT NOT NULL, arr_media_id INTEGER, media_title TEXT,
+                    release_title TEXT, title_slug TEXT, stage TEXT NOT NULL,
+                    attempt_count INTEGER, max_attempts INTEGER, reason TEXT NOT NULL,
+                    created_at TEXT NOT NULL, notification_attempted_at TEXT
+                );
+                CREATE INDEX idx_terminal_events_source
+                    ON terminal_events(source, notification_attempted_at);
+                """
+            )
+            conn.close()
+
+            start = threading.Barrier(2)
+            initialized_columns = []
+            errors = []
+
+            def initialize():
+                try:
+                    start.wait(timeout=5)
+                    db = importer.StateDB(str(db_path))
+                    columns = {
+                        row["name"]
+                        for row in db.conn.execute("PRAGMA table_info(pending_adds)").fetchall()
+                    }
+                    db.close()
+                    initialized_columns.append(columns)
+                except Exception as exc:  # collect thread failures for the assertion below
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=initialize) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=15)
+
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(errors, [])
+            self.assertEqual(len(initialized_columns), 2)
+            self.assertIn("seerr_watchlist_status", initialized_columns[0])
+            self.assertIn("seerr_watchlist_warning_notified_at", initialized_columns[0])
+            self.assertEqual(initialized_columns[0], initialized_columns[1])
+
     def test_v11_database_migrates_in_place_and_baselines_old_failed_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

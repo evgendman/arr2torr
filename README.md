@@ -4,7 +4,7 @@
 
 arr2torr is the project and documentation home for **torr-arr-importer**, a polling service that transfers releases selected with **Grab** in Radarr or Sonarr directly to the TorrServer API. It is intended for a media workflow where the user wants to start streaming from TorrServer, then expose those streams to a media library through STRM files or another integration.
 
-The current implementation described here is **torr-arr-importer v1.3.0**.
+The current implementation described here is **torr-arr-importer v1.3.1**.
 
 ## Why this exists
 
@@ -185,7 +185,7 @@ The current stored data subset includes source instance name, media type, target
 - [Roadmap and validation status](ROADMAP.md)
 - [Version history](CHANGELOG.md)
 
-The current code package is **torr-arr-importer v1.3.0**. It uses Python 3.11+ and the standard library; it does not require external Python packages.
+The current code package is **torr-arr-importer v1.3.1**. It uses Python 3.11+ and the standard library; it does not require external Python packages.
 
 ## Related project: STRM/NFO library generation
 

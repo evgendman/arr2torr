@@ -1,6 +1,6 @@
 # Roadmap
 
-This document records the current **torr-arr-importer v1.2.0** implementation separately from remaining work and live validation.
+This document records the current **torr-arr-importer v1.3.1** implementation separately from remaining work and live validation.
 
 ## Implemented
 
@@ -136,7 +136,7 @@ The GitHub Actions workflow passed on both Python 3.11 and 3.12 with 19 unit tes
 
 ### 1. Register terminal TorrServer transfer failures in Seerr Watchlist
 
-**Status: implemented in v1.3.0; 28 unit tests pass. Live Seerr API validation and production activation remain pending until a real API key is configured.**
+**Status: implemented in v1.3.0; 29 unit tests pass after the v1.3.1 concurrent-migration fix. Live Seerr API validation and production activation remain pending until a real API key is configured.**
 
 **Goal**
 
