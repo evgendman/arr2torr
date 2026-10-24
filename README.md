@@ -200,5 +200,3 @@ The existing v1.2.0 Apprise notification flow was exercised end to end; v1.3.0 a
 Not every torrent is guaranteed to become ready. During live Sonarr tests, one release remained absent from TorrServer's list after the 120-second verification deadline on repeated attempts and stayed in bounded retry state. The importer surfaced this through warning messages instead of falsely marking the release imported. The notification delivery path worked for those warnings. A terminal failure path was also exercised with Radarr, and its critical notification arrived.
 
 The importer remains conservative: TorrServer membership and shared SQLite history are compared on each run, only verified additions enter successful import history, failures are logged and normal operation does not override a deliberate removal decision. Only the Radarr/Sonarr 1080p timers were validated as enabled and active; this status does not imply that either 4K timer is enabled.
-
-[executed on device: MINI-Ubuntu (5af1d950-cbcd-44f8-a387-d31d9aa5f0f7)]
