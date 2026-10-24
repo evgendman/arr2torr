@@ -4,7 +4,7 @@
 
 arr2torr is the project and documentation home for **torr-arr-importer**, a polling service that transfers releases selected with **Grab** in Radarr or Sonarr directly to the TorrServer API. It is intended for a media workflow where the user wants to start streaming from TorrServer, then expose those streams to a media library through STRM files or another integration.
 
-The current implementation described here is **torr-arr-importer v1.3.0**.
+The current implementation described here is **torr-arr-importer v1.3.1**.
 
 ## Why this exists
 
@@ -185,7 +185,7 @@ The current stored data subset includes source instance name, media type, target
 - [Roadmap and validation status](ROADMAP.md)
 - [Version history](CHANGELOG.md)
 
-The current code package is **torr-arr-importer v1.3.0**. It uses Python 3.11+ and the standard library; it does not require external Python packages.
+The current code package is **torr-arr-importer v1.3.1**. It uses Python 3.11+ and the standard library; it does not require external Python packages.
 
 ## Related project: STRM/NFO library generation
 
@@ -200,3 +200,5 @@ The existing v1.2.0 Apprise notification flow was exercised end to end; v1.3.0 a
 Not every torrent is guaranteed to become ready. During live Sonarr tests, one release remained absent from TorrServer's list after the 120-second verification deadline on repeated attempts and stayed in bounded retry state. The importer surfaced this through warning messages instead of falsely marking the release imported. The notification delivery path worked for those warnings. A terminal failure path was also exercised with Radarr, and its critical notification arrived.
 
 The importer remains conservative: TorrServer membership and shared SQLite history are compared on each run, only verified additions enter successful import history, failures are logged and normal operation does not override a deliberate removal decision. Only the Radarr/Sonarr 1080p timers were validated as enabled and active; this status does not imply that either 4K timer is enabled.
+
+[executed on device: MINI-Ubuntu (5af1d950-cbcd-44f8-a387-d31d9aa5f0f7)]
