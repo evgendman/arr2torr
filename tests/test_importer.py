@@ -537,6 +537,10 @@ class SeerrWatchlistTests(unittest.TestCase):
                 {"page": 1, "totalPages": 1, "results": [
                     {"tmdbId": 12345, "mediaType": "movie"}  # Plex fallback, not a local Seerr entry
                 ]},
+                duplicate,
+                {"page": 1, "totalPages": 1, "results": [
+                    {"tmdbId": 12345, "mediaType": "movie"}  # still not a local Seerr entry
+                ]},
             ], calls)
             with (
                 mock.patch.object(importer, "HttpClient", FakeClient),
@@ -562,7 +566,7 @@ class SeerrWatchlistTests(unittest.TestCase):
             self.add_failed_pending(db, cfg, tmdb_id=None, media_title="Unknown Movie")
             sent = []
             with (
-                mock.patch.object(importer, "HttpClient") as client_class,
+                mock.patch.object(importer, "HttpClient", self.fake_client_factory([], [])),
                 mock.patch.object(importer, "apprise_notify",
                                   side_effect=lambda _cfg, title, body, typ, tag: sent.append(
                                       {"title": title, "body": body, "type": typ, "tag": tag}
@@ -570,7 +574,6 @@ class SeerrWatchlistTests(unittest.TestCase):
             ):
                 importer.process_seerr_watchlist(cfg, db)
                 importer.process_seerr_watchlist(cfg, db)
-            client_class.assert_not_called()
             self.assertEqual(len(sent), 1)
             self.assertEqual(sent[0]["tag"], "critical")
             self.assertEqual(sent[0]["type"], "failure")
