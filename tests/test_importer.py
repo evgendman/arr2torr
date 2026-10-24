@@ -357,6 +357,279 @@ class StateMigrationTests(unittest.TestCase):
             db.close()
 
 
+class SeerrWatchlistTests(unittest.TestCase):
+    def make_seerr_config(self, root, *, arr_type="radarr"):
+        cfg = make_config(root)
+        if arr_type == "sonarr":
+            cfg = importer.replace(
+                cfg,
+                name="sonarr-1080",
+                arr_type="sonarr",
+                category="tv",
+                lock_file=str(Path(root) / "sonarr-1080.lock"),
+            )
+        return importer.replace(
+            cfg,
+            notifications_enabled=True,
+            apprise_url="http://192.168.0.14:8000",
+            apprise_config_key="arr-stack",
+            service_name=f"arr2torr / {arr_type} test",
+            notification_tag_critical="critical",
+            notification_tag_warning="warnings",
+            seerr_watchlist_enabled=True,
+            seerr_url="http://192.168.0.14:5055",
+            seerr_api_key="test-seerr-key",
+        ).normalized()
+
+    def add_failed_pending(self, db, cfg, *, torrent_hash=HASH1, tmdb_id=12345,
+                           media_title="Example Media", release_title="Example.Release"):
+        grab = make_grab(torrent_hash, 1, release_title)
+        db.begin_pending(
+            grab, cfg.name,
+            {"title": media_title, "tmdbId": tmdb_id, "tvdbId": 54321},
+            120,
+        )
+        self.assertEqual(db.fail_pending(torrent_hash, "TorrServer verification failed", 1, 1), "failed")
+
+    def fake_client_factory(self, actions, calls):
+        class FakeClient:
+            def __init__(self, timeout, user_agent, api_key=None, **_kwargs):
+                self.api_key = api_key
+
+            def request_json(self, method, url, payload=None, api_key=False,
+                             retry_count=0, retry_delay=1.0):
+                calls.append({
+                    "method": method,
+                    "url": url,
+                    "payload": payload,
+                    "api_key_header": api_key,
+                    "api_key": self.api_key,
+                })
+                if not actions:
+                    raise AssertionError(f"Unexpected HTTP call: {method} {url}")
+                action = actions.pop(0)
+                if isinstance(action, Exception):
+                    raise action
+                return action
+
+        return FakeClient
+
+    def test_feature_is_off_by_default_and_enabled_requires_real_credentials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp)).normalized()
+            self.assertFalse(cfg.seerr_watchlist_enabled)
+            with self.assertRaisesRegex(ValueError, "seerr_url"):
+                importer.replace(cfg, seerr_watchlist_enabled=True).normalized()
+            valid = importer.replace(
+                cfg,
+                notifications_enabled=True,
+                apprise_url="http://192.168.0.14:8000",
+                seerr_watchlist_enabled=True,
+                seerr_url="http://192.168.0.14:5055",
+                seerr_api_key="test-seerr-key",
+            ).normalized()
+            self.assertEqual(valid.seerr_url, "http://192.168.0.14:5055")
+            with self.assertRaisesRegex(ValueError, "real key"):
+                importer.replace(valid, seerr_api_key="PUT_SEERR_API_KEY_HERE").normalized()
+
+    def test_movie_post_adds_once_and_sends_warning_to_warnings_tag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_seerr_config(Path(tmp))
+            db = importer.StateDB(cfg.state_db)
+            self.add_failed_pending(db, cfg, media_title="The Example Movie")
+            calls, sent = [], []
+            FakeClient = self.fake_client_factory([{"id": 99}], calls)
+            with (
+                mock.patch.object(importer, "HttpClient", FakeClient),
+                mock.patch.object(importer, "apprise_notify",
+                                  side_effect=lambda _cfg, title, body, typ, tag: sent.append(
+                                      {"title": title, "body": body, "type": typ, "tag": tag}
+                                  ) or True),
+            ):
+                importer.process_seerr_watchlist(cfg, db)
+                importer.process_seerr_watchlist(cfg, db)
+
+            posts = [call for call in calls if call["method"] == "POST"]
+            self.assertEqual(len(posts), 1)
+            self.assertEqual(posts[0]["url"], "http://192.168.0.14:5055/api/v1/watchlist")
+            self.assertEqual(posts[0]["payload"], {"tmdbId": 12345, "mediaType": "movie"})
+            self.assertTrue(posts[0]["api_key_header"])
+            self.assertEqual(posts[0]["api_key"], "test-seerr-key")
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(sent[0]["type"], "warning")
+            self.assertEqual(sent[0]["tag"], "warnings")
+            self.assertIn("не означает, что медиа уже доступно", sent[0]["body"])
+            self.assertIn("The Example Movie", sent[0]["body"])
+            row = db.pending_rows(cfg.name)[0]
+            self.assertEqual(row["seerr_watchlist_status"], "added")
+            self.assertIsNotNone(row["seerr_watchlist_warning_notified_at"])
+            db.close()
+
+    def test_series_post_requests_the_whole_series_at_title_level(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_seerr_config(Path(tmp), arr_type="sonarr")
+            db = importer.StateDB(cfg.state_db)
+            grab = importer.Grab(
+                history_id=1, movie_id=None, series_id=44,
+                source_title="Example.Series.S02E03", date=None,
+                data={"torrentInfoHash": HASH1, "downloadUrl": f"magnet:?xt=urn:btih:{HASH1}"},
+                quality={}, languages=[], custom_formats=[], custom_format_score=None, download_id=None,
+            )
+            db.begin_pending(grab, cfg.name, {"title": "Example Series", "tmdbId": 9876, "tvdbId": 54321}, 120)
+            db.fail_pending(HASH1, "TorrServer verification failed", 1, 1)
+            calls, sent = [], []
+            FakeClient = self.fake_client_factory([{"id": 100}], calls)
+            with (
+                mock.patch.object(importer, "HttpClient", FakeClient),
+                mock.patch.object(importer, "apprise_notify",
+                                  side_effect=lambda *_args: sent.append(_args) or True),
+            ):
+                importer.process_seerr_watchlist(cfg, db)
+            post = next(call for call in calls if call["method"] == "POST")
+            self.assertEqual(post["payload"], {"tmdbId": 9876, "mediaType": "tv"})
+            self.assertNotIn("seasons", post["payload"])
+            self.assertNotIn("episodes", post["payload"])
+            self.assertEqual(sent[0][3], "warning")
+            self.assertEqual(sent[0][4], "warnings")
+            db.close()
+
+    def test_duplicate_409_is_accepted_only_after_local_watchlist_verification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_seerr_config(Path(tmp))
+            db = importer.StateDB(cfg.state_db)
+            self.add_failed_pending(db, cfg)
+            calls, sent = [], []
+            duplicate = importer.HttpStatusError(
+                409, "POST", "http://192.168.0.14:5055/api/v1/watchlist",
+                '{"message":"Request for this media already exists."}',
+            )
+            FakeClient = self.fake_client_factory([
+                duplicate,
+                {"page": 1, "totalPages": 1, "results": [
+                    {"tmdbId": 12345, "mediaType": "movie", "requestedBy": {"id": 1}}
+                ]},
+            ], calls)
+            with (
+                mock.patch.object(importer, "HttpClient", FakeClient),
+                mock.patch.object(importer, "apprise_notify",
+                                  side_effect=lambda _cfg, title, body, typ, tag: sent.append(
+                                      {"title": title, "body": body, "type": typ, "tag": tag}
+                                  ) or True),
+            ):
+                importer.process_seerr_watchlist(cfg, db)
+            self.assertEqual([x["method"] for x in calls], ["POST", "GET"])
+            self.assertIn("/api/v1/user/1/watchlist?page=1", calls[1]["url"])
+            row = db.pending_rows(cfg.name)[0]
+            self.assertEqual(row["seerr_watchlist_status"], "already_present")
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(sent[0]["type"], "warning")
+            db.close()
+
+    def test_409_without_local_requester_confirmation_is_a_critical_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_seerr_config(Path(tmp))
+            db = importer.StateDB(cfg.state_db)
+            self.add_failed_pending(db, cfg)
+            calls, sent = [], []
+            duplicate = importer.HttpStatusError(409, "POST", "http://192.168.0.14:5055/api/v1/watchlist", "Something wrong")
+            FakeClient = self.fake_client_factory([
+                duplicate,
+                {"page": 1, "totalPages": 1, "results": [
+                    {"tmdbId": 12345, "mediaType": "movie"}  # Plex fallback, not a local Seerr entry
+                ]},
+            ], calls)
+            with (
+                mock.patch.object(importer, "HttpClient", FakeClient),
+                mock.patch.object(importer, "apprise_notify",
+                                  side_effect=lambda _cfg, title, body, typ, tag: sent.append(
+                                      {"title": title, "body": body, "type": typ, "tag": tag}
+                                  ) or True),
+            ):
+                importer.process_seerr_watchlist(cfg, db)
+                importer.process_seerr_watchlist(cfg, db)
+            row = db.pending_rows(cfg.name)[0]
+            self.assertEqual(row["seerr_watchlist_status"], "error")
+            errors = [item for item in sent if item["tag"] == "critical" and item["type"] == "failure"]
+            self.assertEqual(len(errors), 1)  # unchanged error is not notified every timer run
+            self.assertIn("not found", errors[0]["body"])
+            self.assertNotIn("test-seerr-key", repr(sent))
+            db.close()
+
+    def test_missing_tmdb_id_skips_api_and_sends_one_critical_notice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_seerr_config(Path(tmp))
+            db = importer.StateDB(cfg.state_db)
+            self.add_failed_pending(db, cfg, tmdb_id=None, media_title="Unknown Movie")
+            sent = []
+            with (
+                mock.patch.object(importer, "HttpClient") as client_class,
+                mock.patch.object(importer, "apprise_notify",
+                                  side_effect=lambda _cfg, title, body, typ, tag: sent.append(
+                                      {"title": title, "body": body, "type": typ, "tag": tag}
+                                  ) or True),
+            ):
+                importer.process_seerr_watchlist(cfg, db)
+                importer.process_seerr_watchlist(cfg, db)
+            client_class.assert_not_called()
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(sent[0]["tag"], "critical")
+            self.assertEqual(sent[0]["type"], "failure")
+            self.assertIn("TMDb ID is missing", sent[0]["body"])
+            self.assertEqual(db.pending_rows(cfg.name)[0]["seerr_watchlist_status"], "missing_tmdb_id")
+            db.close()
+
+    def test_permanent_prepare_failure_persists_tmdb_id_and_is_processed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_seerr_config(Path(tmp))
+            db = importer.StateDB(cfg.state_db)
+            db.record_terminal_event(
+                event_key=f"{cfg.name}:{HASH1}:prepare",
+                source=cfg.name, arr_type="radarr", category="movie",
+                arr_media_id=111, media_title="Prepare Failure",
+                release_title="Prepare.Failure.Release", title_slug="prepare-failure",
+                stage="prepare", reason="HTTP 410 resolving download URL", tmdb_id=4567, tvdb_id=None,
+            )
+            calls, sent = [], []
+            FakeClient = self.fake_client_factory([{"id": 101}], calls)
+            with (
+                mock.patch.object(importer, "HttpClient", FakeClient),
+                mock.patch.object(importer, "apprise_notify",
+                                  side_effect=lambda _cfg, title, body, typ, tag: sent.append(
+                                      {"title": title, "body": body, "type": typ, "tag": tag}
+                                  ) or True),
+            ):
+                importer.process_seerr_watchlist(cfg, db)
+            self.assertEqual(calls[0]["payload"], {"tmdbId": 4567, "mediaType": "movie"})
+            row = db.conn.execute(
+                "SELECT tmdb_id, seerr_watchlist_status FROM terminal_events WHERE event_key = ?",
+                (f"{cfg.name}:{HASH1}:prepare",),
+            ).fetchone()
+            self.assertEqual(row["tmdb_id"], "4567")
+            self.assertEqual(row["seerr_watchlist_status"], "added")
+            self.assertEqual(sent[0]["tag"], "warnings")
+            db.close()
+
+    def test_only_final_failures_for_current_arr_instance_are_selected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self.make_seerr_config(Path(tmp))
+            db = importer.StateDB(cfg.state_db)
+            self.add_failed_pending(db, cfg, torrent_hash=HASH1, tmdb_id=111)
+            retry = make_grab(HASH2, 2, "Retry.Release")
+            db.begin_pending(retry, cfg.name, {"title": "Retry Movie", "tmdbId": 222}, 120)
+            db.fail_pending(HASH2, "temporary", 3, 1)
+            # This unrelated terminal item belongs to Sonarr and must not be selected by the Radarr instance.
+            db.record_terminal_event(
+                event_key="sonarr-1080:unrelated:prepare", source="sonarr-1080",
+                arr_type="sonarr", category="tv", arr_media_id=9,
+                media_title="Unrelated", release_title="Unrelated.Release", title_slug=None,
+                stage="prepare", reason="permanent", tmdb_id=333,
+            )
+            rows = db.seerr_watchlist_candidates(cfg.name)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["record_key"], HASH1)
+            db.close()
+
+
 class NotificationTests(unittest.TestCase):
     def make_notification_config(self, root):
         return importer.replace(
