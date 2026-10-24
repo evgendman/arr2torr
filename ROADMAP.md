@@ -134,7 +134,7 @@ The GitHub Actions workflow passed on both Python 3.11 and 3.12 with 19 unit tes
 
 ## Planned improvements
 
-### 2. Register terminal TorrServer transfer failures in Seerr Watchlist
+### 1. Register terminal TorrServer transfer failures in Seerr Watchlist
 
 **Status: planned. Implement as an opt-in feature of the existing arr2torr importer, not as a separate service.**
 
@@ -189,7 +189,7 @@ When an Arr release reaches a terminal transfer failure in TorrServer, place its
 - [ ] Document settings, log events, Apprise routes, duplicate behavior and recovery/operations.
 
 
-### 1. Preserve more useful Arr metadata
+### 2. Preserve more useful Arr metadata
 
 v1.0.3 reads the history quality, languages and customFormats fields but the current TorrServer data payload does not persist those complete objects. Consider adding a carefully versioned and sanitized subset, for example:
 
