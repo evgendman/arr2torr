@@ -28,7 +28,7 @@ from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 DEFAULT_PAGE_SIZE = 1000
 DEFAULT_TIMEOUT = 30
 
@@ -85,7 +85,7 @@ class Config:
     state_db: str
     history_page_size: int = DEFAULT_PAGE_SIZE
     timeout: int = DEFAULT_TIMEOUT
-    user_agent: str = "torr-arr-importer/1.3.0"
+    user_agent: str = "torr-arr-importer/1.3.1"
     log_level: str = "INFO"
     log_file: str = ""
     retry_count: int = 2
@@ -318,11 +318,23 @@ class StateDB:
     def __init__(self, path: str) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.path), timeout=30)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA synchronous=NORMAL")
-        self._init()
+        # Different profile services share one database. Lock before opening the
+        # connection so concurrent first-use PRAGMA/schema initialization is safe.
+        init_lock_path = self.path.with_name(self.path.name + ".init.lock")
+        with init_lock_path.open("a") as init_lock:
+            fcntl.flock(init_lock.fileno(), fcntl.LOCK_EX)
+            try:
+                self.conn = sqlite3.connect(str(self.path), timeout=30)
+                self.conn.row_factory = sqlite3.Row
+                self.conn.execute("PRAGMA journal_mode=WAL")
+                self.conn.execute("PRAGMA synchronous=NORMAL")
+                self._init()
+            except Exception:
+                if hasattr(self, "conn"):
+                    self.conn.close()
+                raise
+            finally:
+                fcntl.flock(init_lock.fileno(), fcntl.LOCK_UN)
 
     def _init(self) -> None:
         self.conn.executescript(
@@ -401,6 +413,10 @@ class StateDB:
                 ON terminal_events(source, notification_attempted_at);
             """
         )
+        # Multiple importer profiles share this database and may start together.
+        # Serialize schema inspection + ALTER TABLE so another process cannot add
+        # a column after this process inspected the old schema.
+        self.conn.execute("BEGIN IMMEDIATE")
         columns = {
             str(row["name"])
             for row in self.conn.execute("PRAGMA table_info(pending_adds)").fetchall()
@@ -1911,7 +1927,7 @@ def config_from_file(path: str) -> Config:
         state_db=str(raw.get("state_db", "/var/lib/torr-arr-importer/state.db")),
         history_page_size=int(raw.get("history_page_size", DEFAULT_PAGE_SIZE)),
         timeout=int(raw.get("timeout", DEFAULT_TIMEOUT)),
-        user_agent=str(raw.get("user_agent", "torr-arr-importer/1.3.0")),
+        user_agent=str(raw.get("user_agent", "torr-arr-importer/1.3.1")),
         log_level=str(raw.get("log_level", "INFO")).upper(),
         log_file=str(raw.get("log_file", "")),
         retry_count=int(raw.get("retry_count", 2)),
@@ -1971,3 +1987,5 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+[executed on device: MINI-Ubuntu (5af1d950-cbcd-44f8-a387-d31d9aa5f0f7)]
