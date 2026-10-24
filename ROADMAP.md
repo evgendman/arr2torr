@@ -151,8 +151,9 @@ When an Arr release reaches a terminal transfer failure in TorrServer, place its
 
 **Selection and API behavior**
 
-- Process only terminal TorrServer add/verification failures in `pending_adds` with `status = 'failed'`, scoped to the currently configured Arr instance/source. Do not process `pending` or `retry_wait` records.
+- Process terminal failures from both `pending_adds` rows with `status = 'failed'` and `terminal_events` records for permanent preparation failures, scoped to the currently configured Arr instance/source. Do not process `pending` or `retry_wait` records.
 - Use the `tmdb_id` already persisted by arr2torr and the configured media type (`movie` for Radarr, `tv` for Sonarr). Do not perform a separate TMDb lookup or attempt ID conversion in this feature.
+- `terminal_events` currently does not persist `tmdb_id`/`tvdb_id`; extend its schema and `record_terminal_event` call to save provider IDs when Arr media details were fetched. If the ID is unavailable in the failure record, do not call Seerr or resolve it externally: record the missing-ID error and notify.
 - If `tmdb_id` is missing or invalid, do not call Seerr. Record a clear error/state and make the item visible in logs and an error notification.
 - Add films through `POST /api/v1/watchlist` with `tmdbId` and `mediaType: "movie"`. Add series with `tmdbId` and `mediaType: "tv"`; Seerr Watchlist is title-level, so add the whole series. Do not send season or episode fields.
 - A successful `201` response means the item was added. Do not perform a full Watchlist scan before every post.
@@ -163,10 +164,10 @@ When an Arr release reaches a terminal transfer failure in TorrServer, place its
 **Notifications and logging**
 
 - Log each meaningful outcome with the Arr instance, media type/title and TMDb ID where available: added, already present, skipped due to missing ID, and failed. Never log the Seerr API key.
-- After successful addition, send a success notification through the existing Apprise integration, routed to tag `warnings` with informational/success semantics. Aggregate newly registered items per run where practical rather than sending one message for every release. Include the media title/type so the user knows what now needs attention in Seerr.
+- After a new successful addition (`201`), send a success notification through the existing Apprise integration using type `success` and tag `library` (the existing Telegram library topic). Aggregate newly registered items per run where practical rather than sending one message for every release. Include media title/type so the user knows what now needs attention in Seerr. Add a configurable `notification_tag_library` setting defaulting to `library`; keep `critical` for errors. A confirmed duplicate/already-present entry is logged but does not generate another success notification.
 - If Watchlist registration fails (including a missing TMDb ID), log the error and send an Apprise failure notification to tag `critical`, including the title when known and a short sanitized reason.
 - Persist notification/deduplication state so unchanged failures are not announced every timer run and successful items do not generate repeated success messages. Transient Seerr/network errors remain eligible for a later retry. Apprise delivery failure is logged locally and must not crash arr2torr or cause recursive notifications.
-- Reuse the existing Apprise URL, config key and tags from the current arr2torr configuration and shared notification contract. Keep Telegram destinations/topic IDs inside Apprise, not in arr2torr.
+- Reuse the existing Apprise URL and config key from the current arr2torr configuration and shared notification contract. Add the configurable `notification_tag_library` (default `library`) and use the existing `notification_tag_critical` for registration errors. Keep Telegram destinations/topic IDs inside Apprise, not in arr2torr.
 
 **Manual API validation before implementation**
 
@@ -180,10 +181,10 @@ When an Arr release reaches a terminal transfer failure in TorrServer, place its
 
 - [ ] Validate manual Seerr API behavior (new item, duplicate item, reading Watchlist, and series).
 - [ ] Add opt-in Seerr URL/key settings and safe validation/redaction.
-- [ ] Add an in-place SQLite migration for separate per-failure Watchlist state and notification deduplication.
-- [ ] Select only `failed` pending-add rows for the active source and use their persisted TMDb ID; no ID conversion or external lookup.
+- [ ] Add in-place SQLite migrations for separate per-failure Watchlist state and notification deduplication on both `pending_adds` and `terminal_events`; add provider-ID fields to `terminal_events` and populate them for new events where Arr details are available.
+- [ ] Select `failed` pending-add rows and permanent `terminal_events` for the active source; use persisted TMDb IDs only, with no ID conversion or external lookup.
 - [ ] Implement title-level movie/series Watchlist POSTs, and on `409` verify membership before treating it as an existing item.
-- [ ] Add grouped success notifications to Apprise `warnings` and error notifications to `critical`; deduplicate unchanged results and keep delivery failures non-fatal.
+- [ ] Add grouped success notifications to Apprise `library` (type `success`) and error notifications to `critical` (type `failure`); deduplicate unchanged results and keep delivery failures non-fatal.
 - [ ] Add tests for status/source filtering, missing IDs, payload types, duplicate verification, retry after temporary API failure, notification deduplication, secret redaction and migration of an existing SQLite database.
 - [ ] Test `dry-run` behavior and a live one-film/one-series path before enabling it for the configured production instances.
 - [ ] Document settings, log events, Apprise routes, duplicate behavior and recovery/operations.
