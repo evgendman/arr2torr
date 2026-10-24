@@ -321,5 +321,3 @@ The intended local file layout is:
     /etc/systemd/system/torr-arr-importer@.timer
 
 The service runs as torrimport, with restricted systemd settings and write access to its state/log directories. Config files should be readable by root and group torrimport, mode 0640, and must not be committed with real API keys.
-
-[executed on device: MINI-Ubuntu (5af1d950-cbcd-44f8-a387-d31d9aa5f0f7)]
