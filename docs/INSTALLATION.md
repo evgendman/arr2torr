@@ -1,6 +1,6 @@
 # Installation and configuration
 
-The instructions below describe the v1.3.0 systemd deployment and its optional Seerr Watchlist integration. The four-instance examples are intended to be adapted to the actual addresses, ports and API keys in your installation.
+The instructions below describe the v1.3.1 systemd deployment and its optional Seerr Watchlist integration. The four-instance examples are intended to be adapted to the actual addresses, ports and API keys in your installation.
 
 ## Requirements
 
@@ -321,3 +321,5 @@ The intended local file layout is:
     /etc/systemd/system/torr-arr-importer@.timer
 
 The service runs as torrimport, with restricted systemd settings and write access to its state/log directories. Config files should be readable by root and group torrimport, mode 0640, and must not be committed with real API keys.
+
+[executed on device: MINI-Ubuntu (5af1d950-cbcd-44f8-a387-d31d9aa5f0f7)]
