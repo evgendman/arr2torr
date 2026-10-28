@@ -97,7 +97,7 @@ The optional Seerr integration registers a movie or whole series in the administ
 - Uses only the TMDb ID already stored in arr2torr. Missing IDs are recorded and reported; there is no separate metadata lookup.
 - The Seerr registration result is included in the same final critical transfer-failure message; there is no separate warnings or Seerr notification. A successful or verified-existing Watchlist entry is described naturally, while registration errors are reported honestly and are retried by the integration where applicable.
 - Watchlist processing state is stored in additional SQLite columns and is migrated in place. The import history and original TorrServer failure state remain intact.
-- The success notification is not an availability notification: a Watchlist item is **not necessarily available to watch**.
+- The Seerr Watchlist is used as an administrator reminder list for failed transfers; it does not create a Seerr media request.
 
 The setting is off in all example configs until a real key is supplied and the operator enables it. Configure only the two active 1080p profiles unless the 4K instances are intentionally brought into use.
 
