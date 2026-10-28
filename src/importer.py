@@ -1161,6 +1161,25 @@ def process_radarr_blocklist(cfg: Config, arr: HttpClient, db: StateDB) -> None:
         )
         safe_release_title = safe_notification_text(release_title or "Unknown", 200)
         current_status = str(row.get("radarr_blocklist_status") or "")
+        attempt_count = int(row.get("attempt_count") or 0)
+
+        # A definitive terminal status can occur before the configured retry limit
+        # (for example, a permanent API rejection). Only an ambiguous request already
+        # in flight is verified regardless of count; do not blocklist a fresh item early.
+        if current_status not in {"request_started", "verify_pending"} and attempt_count < cfg.max_add_attempts:
+            reason = (
+                f"attempt count {attempt_count}/{cfg.max_add_attempts}; "
+                "configured attempt limit has not been exhausted"
+            )
+            db.set_radarr_blocklist_state(
+                torrent_hash, "skipped_attempt_limit", error=reason, verify_misses=0
+            )
+            logging.warning(
+                "RADARR_BLOCKLIST_SKIPPED source=%s media_id=%s history_id=%s title=%r release=%r attempts=%d/%d reason=attempt-limit-not-exhausted",
+                cfg.name, media_id or "missing", history_id or "missing",
+                media_title, safe_release_title, attempt_count, cfg.max_add_attempts,
+            )
+            continue
 
         if not torrent_hash or not media_id or not history_id or not release_title:
             reason = "required Radarr history/media/release identity is missing"
@@ -1234,22 +1253,6 @@ def process_radarr_blocklist(cfg: Config, arr: HttpClient, db: StateDB) -> None:
                     "RADARR_BLOCKLIST_VERIFY_PENDING source=%s media_id=%s history_id=%s title=%r release=%r verify_misses=%d/3",
                     cfg.name, media_id, history_id, media_title, safe_release_title, misses,
                 )
-            continue
-
-        attempt_count = int(row.get("attempt_count") or 0)
-        if attempt_count < cfg.max_add_attempts:
-            reason = (
-                f"attempt count {attempt_count}/{cfg.max_add_attempts}; "
-                "configured attempt limit has not been exhausted"
-            )
-            db.set_radarr_blocklist_state(
-                torrent_hash, "skipped_attempt_limit", error=reason, verify_misses=0
-            )
-            logging.warning(
-                "RADARR_BLOCKLIST_SKIPPED source=%s media_id=%s history_id=%s title=%r release=%r attempts=%d/%d reason=attempt-limit-not-exhausted",
-                cfg.name, media_id, history_id, media_title, safe_release_title,
-                attempt_count, cfg.max_add_attempts,
-            )
             continue
 
         # Persist the intent before the side effect. If the process dies after the
