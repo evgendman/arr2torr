@@ -28,7 +28,7 @@ from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 DEFAULT_PAGE_SIZE = 1000
 DEFAULT_TIMEOUT = 30
 
@@ -85,7 +85,7 @@ class Config:
     state_db: str
     history_page_size: int = DEFAULT_PAGE_SIZE
     timeout: int = DEFAULT_TIMEOUT
-    user_agent: str = "torr-arr-importer/1.3.1"
+    user_agent: str = "torr-arr-importer/1.3.2"
     log_level: str = "INFO"
     log_file: str = ""
     retry_count: int = 2
@@ -1950,7 +1950,7 @@ def config_from_file(path: str) -> Config:
         state_db=str(raw.get("state_db", "/var/lib/torr-arr-importer/state.db")),
         history_page_size=int(raw.get("history_page_size", DEFAULT_PAGE_SIZE)),
         timeout=int(raw.get("timeout", DEFAULT_TIMEOUT)),
-        user_agent=str(raw.get("user_agent", "torr-arr-importer/1.3.1")),
+        user_agent=str(raw.get("user_agent", "torr-arr-importer/1.3.2")),
         log_level=str(raw.get("log_level", "INFO")).upper(),
         log_file=str(raw.get("log_file", "")),
         retry_count=int(raw.get("retry_count", 2)),
