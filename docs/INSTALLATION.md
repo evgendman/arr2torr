@@ -1,6 +1,6 @@
 # Installation and configuration
 
-The instructions below describe the v1.3.1 systemd deployment and its optional Seerr Watchlist integration. The four-instance examples are intended to be adapted to the actual addresses, ports and API keys in your installation.
+The instructions below describe the v1.3.2 systemd deployment, default-enabled Radarr terminal-failure blocklisting, and optional Seerr Watchlist integration. The four-instance examples are intended to be adapted to the actual addresses, ports and API keys in your installation.
 
 ## Requirements
 
@@ -149,6 +149,20 @@ For other instances, use the matching config/*.toml.example file.
 - An empty log_file sends logs to the system journal only.
 
 For the second Radarr/Sonarr profile, replace the base URL, API key, name, category and target-quality value with those belonging to that instance.
+
+## Radarr terminal-failure blocklisting (v1.3.2)
+
+The setting radarr_blocklist_enabled defaults to true for Radarr profiles, including when it is absent from an existing configuration. The importer invokes Radarr's native POST /api/v3/history/failed/{historyId} action only after a TorrServer add/verification attempt becomes terminal (pending_adds.status = 'failed'). This lets Radarr use its normal failed-download and blocklist logic, including replacement search if enabled in Radarr.
+
+Add this line explicitly to a Radarr config if you prefer the behavior to be visible in the file:
+
+    radarr_blocklist_enabled = true
+
+Set it to false to disable it. It has no effect in Sonarr profiles. Retries still run as configured; intermediate failures and permanent errors before an add is sent to TorrServer are not blocklisted.
+
+The SQLite migration is in-place. Failed rows that already existed before the new column was added are marked legacy_skipped, so upgrading does not send a large batch of historical failures to Radarr. New terminal failures are handled automatically. --retry-failed resets this state when an exhausted TorrServer attempt is deliberately re-armed.
+
+The final grouped Apprise failure message (if notifications are enabled) includes the actual blocklist outcome, and the service log records the detail. An ambiguous HTTP/network result is checked read-only on later timer runs rather than blindly resending Radarr's failed-history action, because that action can trigger duplicate side effects.
 
 ## Optional Apprise notifications (v1.2.0)
 
