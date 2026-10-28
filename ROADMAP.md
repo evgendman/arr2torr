@@ -322,7 +322,7 @@ The importer already preserves provider IDs and selected Arr fields in TorrServe
 
 ### 10. Automatically blocklist terminally failed Radarr releases
 
-**Status: implementation added in v1.3.2; Python 3.11/3.12 CI passes (40 tests per runtime). Controlled live Radarr validation remains necessary before deployment.**
+**Status: implementation added in v1.3.2; Python 3.11/3.12 CI passes on the prior code revision (40 tests per runtime). Latest attempt-limit notification change is awaiting CI. Controlled live Radarr validation remains necessary before deployment.**
 
 **Goal**
 
@@ -337,7 +337,7 @@ Reduce manual intervention by automatically excluding a release from future Rada
 
 **Trigger and safety rules**
 
-- Process only pending_adds rows that have reached terminal status = 'failed' after TorrServer add/verification. Do not act on retry_wait, while retries remain, or on permanent preparation errors that happened before the TorrServer add.
+- Process only pending_adds rows with terminal status = 'failed' and attempt_count >= max_add_attempts after TorrServer add/verification. Do not act on retry_wait, before the configured count is exhausted, or on permanent preparation errors that happened before the TorrServer add.
 - Preserve the TorrServer attempt/backoff policy. The blocklist action must not mark an unverified torrent as a successful TorrServer import.
 - Track the blocklist state in the existing SQLite database. Add schema columns in place; never reset the shared state database.
 - On first migration, mark failures already present before the feature as legacy_skipped, avoiding an unexpected mass of retrospective Radarr actions on upgrade. New terminal failures remain eligible automatically. Explicit --retry-failed resets the blocklist state for a deliberately re-armed attempt.
@@ -358,8 +358,8 @@ Reduce manual intervention by automatically excluding a release from future Rada
 - [x] Restrict execution to terminal TorrServer add/verification failures in Radarr; keep retries, Sonarr, and pre-add preparation errors out.
 - [x] Add in-place state migration and per-item action/verification status; mark pre-upgrade failed rows as legacy_skipped.
 - [x] Add blocklist outcome to the existing terminal Apprise message and structured result logs, including a skipped log when disabled.
-- [x] Add tests for default-enabled TOML, native endpoint behavior, Radarr-only scope, ambiguous-result recovery, permanent API errors, state migration, and notification wording.
-- [x] Confirm Python 3.11 and 3.12 GitHub Actions checks pass (40 tests per runtime on the current code revision).
+- [x] Add tests for default-enabled TOML, exact attempt-limit boundary, native endpoint behavior, Radarr-only scope, ambiguous-result recovery, permanent API errors, state migration, and notification wording.
+- [x] Confirm Python 3.11 and 3.12 GitHub Actions checks pass on the preceding revision (40 tests per runtime).
 - [ ] Validate a deliberately selected failed Grab in a controlled live Radarr environment before deployment.
 
 ## Explicitly not planned
