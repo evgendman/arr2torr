@@ -733,16 +733,16 @@ class StateDB:
             )
         return cur.rowcount
 
-    def radarr_blocklist_candidates(self, source: str) -> list[dict[str, Any]]:
+    def radarr_blocklist_candidates(self, source: str, max_attempts: int) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             """
             SELECT * FROM pending_adds
-            WHERE source = ? AND status = 'failed'
+            WHERE source = ? AND status = 'failed' AND attempt_count >= ?
               AND (radarr_blocklist_status IS NULL
                    OR radarr_blocklist_status IN ('retry', 'request_started', 'verify_pending'))
             ORDER BY requested_at
             """,
-            (source,),
+            (source, max_attempts),
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -1151,7 +1151,7 @@ def process_radarr_blocklist(cfg: Config, arr: HttpClient, db: StateDB) -> None:
     def title_key(value: Any) -> str:
         return " ".join(str(value or "").split()).casefold()
 
-    for row in db.radarr_blocklist_candidates(cfg.name):
+    for row in db.radarr_blocklist_candidates(cfg.name, cfg.max_add_attempts):
         torrent_hash = str(row.get("hash") or "").strip().lower()
         media_id = as_int(row.get("arr_media_id"))
         history_id = as_int(row.get("arr_history_id"))
