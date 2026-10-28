@@ -68,7 +68,7 @@ That means different versions of one movie or series can coexist in TorrServer. 
 
 radarr_blocklist_enabled defaults to true for Radarr. It can be disabled per Radarr config with radarr_blocklist_enabled = false; Sonarr profiles never execute this path.
 
-The importer acts only on pending_adds rows whose TorrServer add/verification workflow reached terminal status = 'failed' after the configured attempt limit (or a terminal rejection after an add request). It calls Radarr's native POST /api/v3/history/failed/{arr_history_id} for that specific Grab history record. Radarr runs its normal failed-download pipeline to create the blocklist entry and can initiate a replacement search according to Radarr's settings. A retry_wait row is not blocklisted; preparation errors in terminal_events (for example, an expired download URL before the TorrServer add) are also excluded.
+The importer acts only on pending_adds rows whose TorrServer add/verification workflow reached status = 'failed' and whose recorded attempt_count is at least max_add_attempts. A permanent API rejection before that configured attempt limit is reached is not sufficient to blocklist the release. It calls Radarr's native POST /api/v3/history/failed/{arr_history_id} for that specific Grab history record. Radarr runs its normal failed-download pipeline to create the blocklist entry and can initiate a replacement search according to Radarr's settings. A retry_wait row is not blocklisted; preparation errors in terminal_events (for example, an expired download URL before the TorrServer add) are also excluded.
 
 Look for these log events:
 
@@ -76,7 +76,7 @@ Look for these log events:
 - RADARR_BLOCKLIST_ALREADY_PRESENT: after an ambiguous request, a blocklist entry with the same source release title was found.
 - RADARR_BLOCKLIST_VERIFY_PENDING: the request outcome is ambiguous; the importer is performing read-only checks and does not resend the failed-history request.
 - RADARR_BLOCKLIST_FAILED: identity was missing, Radarr rejected the operation, or verification remained inconclusive after three successful checks.
-- RADARR_BLOCKLIST_SKIPPED: the setting is disabled.
+- RADARR_BLOCKLIST_SKIPPED: the setting is disabled, or a terminal row has fewer attempts than max_add_attempts. The latter reason is saved and explained in the terminal notification.
 
 Radarr's public BlocklistResource currently does not expose the torrent infohash. Therefore, recovery after an ambiguous response can match sourceTitle for that movie, but cannot independently prove that the matched entry has the same hash. The normal path does not use a fake POST /blocklist endpoint; it relies on Radarr's own history/failed API.
 
