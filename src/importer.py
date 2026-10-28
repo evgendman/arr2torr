@@ -1262,30 +1262,30 @@ def terminal_notification_block(cfg: Config, row: dict[str, Any], *, preparation
     if release_title and release_title != media_title:
         lines.append(f"Выбранная раздача: {release_title}")
 
-    lines.append("Не удалось передать выбранную раздачу в TorrServer.")
+    lines.append("Не удалось добавить выбранную раздачу в TorrServer.")
     reason = row.get("reason") if preparation else (row.get("reason") or row.get("last_error"))
     lines.append(f"Причина: {human_failure_reason(reason)}")
 
     if not preparation:
         attempts = int(row.get("attempt_count") or 0)
-        lines.append(f"Автоматические попытки исчерпаны: {attempts} из {cfg.max_add_attempts}.")
+        lines.append(f"Автоматические попытки закончились ({attempts} из {cfg.max_add_attempts}).")
 
     arr_label = "Radarr" if cfg.arr_type == "radarr" else "Sonarr"
-    lines.append(f"Рекомендация: выберите другую раздачу в {arr_label} и запустите Grab.")
+    lines.append(f"Советуем выбрать другую раздачу в {arr_label} и нажать Grab.")
 
     if cfg.seerr_watchlist_enabled:
         status = str(row.get("seerr_watchlist_status") or "")
         if status == "added":
-            lines.append("Медиа также добавлено в Watchlist администратора Seerr.")
+            lines.append(f"{media_label} добавлен в Watchlist администратора Seerr." if cfg.category == "movie" else "Сериал добавлен в Watchlist администратора Seerr.")
         elif status == "already_present":
-            lines.append("Медиа уже находилось в Watchlist администратора Seerr.")
+            lines.append(f"{media_label} уже есть в Watchlist администратора Seerr." if cfg.category == "movie" else "Сериал уже есть в Watchlist администратора Seerr.")
         elif status == "missing_tmdb_id":
-            lines.append("Не удалось добавить медиа в Watchlist Seerr: в данных отсутствует TMDb ID.")
+            lines.append(f"Не удалось добавить {media_label.lower()} в Watchlist Seerr: в данных нет TMDb ID.")
         elif status == "error":
             seerr_error = human_seerr_error(row.get("seerr_watchlist_last_error"))
-            lines.append(f"Не удалось подтвердить запись в Watchlist Seerr: {seerr_error}.")
+            lines.append(f"Не удалось добавить {media_label.lower()} в Watchlist Seerr: {seerr_error}.")
         else:
-            lines.append("Статус Watchlist Seerr пока не подтверждён.")
+            lines.append(f"Не удалось проверить статус {media_label.lower()} в Watchlist Seerr; arr2torr попробует снова.")
 
     link = arr_card_url(cfg, row.get("title_slug"))
     if link:
@@ -1352,7 +1352,7 @@ def dispatch_notifications(cfg: Config, db: StateDB) -> None:
         body = terminal_notification_body(cfg, chunk, len(records), index, len(chunks))
         suffix = f" (часть {index}/{len(chunks)})" if len(chunks) > 1 else ""
         noun = "раздачу" if len(records) == 1 else "выбранные раздачи"
-        title = f"{cfg.service_name} — Не удалось передать {noun}{suffix}"
+        title = f"{cfg.service_name} — Не удалось добавить {noun} в TorrServer{suffix}"
         if apprise_notify(cfg, title, body, "failure", cfg.notification_tag_critical):
             db.mark_notification_delivered(chunk)
             logging.info(
