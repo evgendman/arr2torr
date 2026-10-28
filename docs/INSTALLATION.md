@@ -27,30 +27,36 @@ The installer does not enable timers automatically. Configure and test an instan
 > API keys belong only in local files under /etc/torr-arr-importer/. Never commit a populated config to Git.
 
 
-## Upgrade an existing v1.1.0 deployment in place
+## Upgrade from v1.3.1 to v1.3.2 in place
 
-The v1.2.0 source/test revision validated in GitHub Actions is commit `74ee8ac9a8a171be790b5cc314b888cf2e5e19f5` (Python 3.11 and 3.12, 19 tests passed). The upgrade is additive: it adds SQLite columns/tables for notification state, but does not clear or rebuild import history. **Do not delete `/var/lib/torr-arr-importer/state.db`.** The commands below preserve the existing configs and timer enablement.
+**Important:** review the proposed release and complete a deliberate, controlled live Radarr validation before deploying it to production. v1.3.2 enables Radarr's native failed-download/blocklist handling by default, after the configured `max_add_attempts` count is reached. A permanent API rejection before that attempt count is reached is not blocklisted. Sonarr behavior is unchanged.
 
-1. Clone that exact tested revision to a fresh temporary directory, then run tests locally:
+The upgrade adds three columns to the existing `pending_adds` table in-place. It does not clear or rebuild import history. During the first migration, rows already marked `failed` are marked `legacy_skipped`, so old failures are not retroactively sent to Radarr. **Do not delete `/var/lib/torr-arr-importer/state.db`.**
+
+1. Prepare the exact tested candidate in a temporary directory and run the checks:
 
        set -euo pipefail
-       SRC="$(mktemp -d /tmp/arr2torr-v1.2.0.XXXXXX)"
-       git clone https://github.com/evgendman/arr2torr.git "$SRC"
-       git -C "$SRC" checkout 74ee8ac9a8a171be790b5cc314b888cf2e5e19f5
+       SRC="$(mktemp -d /tmp/arr2torr-v1.3.2.XXXXXX)"
+       git clone --branch feature/radarr-blocklist-v1.3.2 https://github.com/evgendman/arr2torr.git "$SRC"
+       git -C "$SRC" checkout d0975787b0f58e54dd6c482701c38ff062f83978
        python3 -m py_compile "$SRC/src/importer.py"
        (cd "$SRC" && python3 -m unittest discover -s tests -v)
        python3 "$SRC/src/importer.py" --version
-       printf '%s\n' "$SRC" > /tmp/arr2torr-v1.2.0-source-path
+       printf '%s\\n' "$SRC" > /tmp/arr2torr-v1.3.2-source-path
 
-2. Stop only the two timers observed active on MINI-Ubuntu, and wait for any oneshot services to finish. Do not enable either 4K timer:
+   The expected version output is `1.3.2`; CI has passed 40 tests on Python 3.11 and 40 on Python 3.12. Use this path only after the candidate has been approved for live validation/deployment.
+
+2. Stop only the two 1080p timers previously observed active on MINI-Ubuntu, then wait for their oneshot services to finish. Do not enable either 4K timer:
 
        sudo systemctl stop torr-arr-importer@radarr-1080.timer torr-arr-importer@sonarr-1080.timer
        while systemctl is-active --quiet torr-arr-importer@radarr-1080.service || systemctl is-active --quiet torr-arr-importer@sonarr-1080.service; do sleep 1; done
 
-3. Back up the live source, config, systemd units and database before installation:
+   If the live timer state has changed, inspect it first and stop only the intended instances.
+
+3. Back up the currently installed program, local configs, systemd units and the SQLite state before running the installer. Keep the backup under `/tmp` and retain its path:
 
        set -euo pipefail
-       BACKUP="$(mktemp -d /tmp/arr2torr-v1.1.0-backup.XXXXXX)"
+       BACKUP="$(mktemp -d /tmp/arr2torr-v1.3.1-backup.XXXXXX)"
        sudo install -d -m 0700 "$BACKUP"
        sudo cp -a /opt/torr-arr-importer/importer.py "$BACKUP/importer.py"
        sudo cp -a /etc/torr-arr-importer "$BACKUP/config"
@@ -67,29 +73,27 @@ The v1.2.0 source/test revision validated in GitHub Actions is commit `74ee8ac9a
        dst.close()
        src.close()
        PY
-       printf '%s\n' "$BACKUP" > /tmp/arr2torr-v1.2.0-backup-path
+       printf '%s\\n' "$BACKUP" > /tmp/arr2torr-v1.3.2-backup-path
        echo "Backup saved under: $BACKUP"
 
-4. Add the opt-in Apprise settings described below to **only** `radarr-1080.toml` and `sonarr-1080.toml`. Leave existing API keys and all retry settings unchanged. Set `arr_ui_url` to the matching browser-facing base URL if you want best-effort item-card links; use an empty string to omit links.
+4. Install the staged source. The installer preserves existing API keys/configuration values and does not clear the state database:
 
-5. Install the staged files, without running any import yet:
-
-       SRC="$(cat /tmp/arr2torr-v1.2.0-source-path)"
-       sudo "$SRC/install.sh"
+       SRC="$(cat /tmp/arr2torr-v1.3.2-source-path)"
+       sudo bash "$SRC/install.sh"
        /opt/torr-arr-importer/importer.py --version
        sudo cmp "$SRC/src/importer.py" /opt/torr-arr-importer/importer.py
 
-6. Run dry-runs with the two existing profiles to validate TOML and API reachability. These commands do not add torrents:
+5. Run read-only dry-runs for the two intended profiles. A dry-run does not send any Radarr blocklist action; it does initialize/migrate the database and baseline existing failed rows, so take the backup first:
 
        sudo -u torrimport /opt/torr-arr-importer/importer.py --config /etc/torr-arr-importer/radarr-1080.toml --dry-run
        sudo -u torrimport /opt/torr-arr-importer/importer.py --config /etc/torr-arr-importer/sonarr-1080.toml --dry-run
 
-7. Start the same timers again and check the state. This starts the previously enabled 1080p timers; it does not enable new units:
+6. After reviewing the dry-run output, start only the same timers that were previously active:
 
        sudo systemctl start torr-arr-importer@radarr-1080.timer torr-arr-importer@sonarr-1080.timer
        systemctl list-timers 'torr-arr-importer@*' --all --no-pager
 
-If rollback is required, stop those timers and restore the backed-up `importer.py` and systemd unit files from the directory recorded in `/tmp/arr2torr-v1.2.0-backup-path`, then run `sudo systemctl daemon-reload` and start only the same two timers. Do **not** overwrite the live database with the old backup as a routine rollback step: the v1.2.0 schema additions are backward-compatible with v1.1.0, and restoring an old DB could discard importer state created since the backup.
+For rollback, stop only those timers and restore the backed-up `importer.py` and unit files, then run `sudo systemctl daemon-reload` and start the same timers again. Do **not** restore an older SQLite backup as a routine rollback step: the added columns are backward-compatible, and overwriting the live DB could discard importer state created since the backup. Review the saved config backup separately if any configuration was changed.
 
 ## 2. Instance naming and profiles
 
