@@ -152,7 +152,7 @@ For the second Radarr/Sonarr profile, replace the base URL, API key, name, categ
 
 ## Radarr terminal-failure blocklisting (v1.3.2)
 
-The setting radarr_blocklist_enabled defaults to true for Radarr profiles, including when it is absent from an existing configuration. The importer invokes Radarr's native POST /api/v3/history/failed/{historyId} action only after a TorrServer add/verification attempt becomes terminal (pending_adds.status = 'failed'). This lets Radarr use its normal failed-download and blocklist logic, including replacement search if enabled in Radarr.
+The setting radarr_blocklist_enabled defaults to true for Radarr profiles, including when it is absent from an existing configuration. The importer invokes Radarr's native POST /api/v3/history/failed/{historyId} action only when a TorrServer add/verification attempt becomes terminal and pending_adds.attempt_count is at least max_add_attempts. A permanent API rejection at a lower attempt count is not sufficient. This lets Radarr use its normal failed-download and blocklist logic, including replacement search if enabled in Radarr.
 
 Add this line explicitly to a Radarr config if you prefer the behavior to be visible in the file:
 
