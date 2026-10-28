@@ -955,10 +955,13 @@ state_db = "{Path(tmp) / 'state.db'}"
         with tempfile.TemporaryDirectory() as tmp:
             cfg, db = self.make_failed(Path(tmp))
             try:
+                cfg = importer.replace(cfg, arr_ui_url="http://127.0.0.1:7878").normalized()
                 row = db.pending_rows(cfg.name)[0]
                 row["radarr_blocklist_status"] = "blocked"
                 message = importer.terminal_notification_block(cfg, row)
                 self.assertIn("Блок-лист Radarr: релиз добавлен", message)
+                self.assertIn("Карточка Arr:", message)
+                self.assertTrue(message.rstrip().endswith("Блок-лист Radarr: релиз добавлен; Radarr сможет исключить эту раздачу при дальнейшем поиске."))
                 disabled = importer.replace(cfg, radarr_blocklist_enabled=False).normalized()
                 self.assertNotIn(
                     "Блок-лист Radarr",
