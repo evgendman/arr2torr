@@ -733,16 +733,16 @@ class StateDB:
             )
         return cur.rowcount
 
-    def radarr_blocklist_candidates(self, source: str, max_attempts: int) -> list[dict[str, Any]]:
+    def radarr_blocklist_candidates(self, source: str) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             """
             SELECT * FROM pending_adds
-            WHERE source = ? AND status = 'failed' AND attempt_count >= ?
+            WHERE source = ? AND status = 'failed'
               AND (radarr_blocklist_status IS NULL
                    OR radarr_blocklist_status IN ('retry', 'request_started', 'verify_pending'))
             ORDER BY requested_at
             """,
-            (source, max_attempts),
+            (source,),
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -1151,7 +1151,7 @@ def process_radarr_blocklist(cfg: Config, arr: HttpClient, db: StateDB) -> None:
     def title_key(value: Any) -> str:
         return " ".join(str(value or "").split()).casefold()
 
-    for row in db.radarr_blocklist_candidates(cfg.name, cfg.max_add_attempts):
+    for row in db.radarr_blocklist_candidates(cfg.name):
         torrent_hash = str(row.get("hash") or "").strip().lower()
         media_id = as_int(row.get("arr_media_id"))
         history_id = as_int(row.get("arr_history_id"))
@@ -1234,6 +1234,22 @@ def process_radarr_blocklist(cfg: Config, arr: HttpClient, db: StateDB) -> None:
                     "RADARR_BLOCKLIST_VERIFY_PENDING source=%s media_id=%s history_id=%s title=%r release=%r verify_misses=%d/3",
                     cfg.name, media_id, history_id, media_title, safe_release_title, misses,
                 )
+            continue
+
+        attempt_count = int(row.get("attempt_count") or 0)
+        if attempt_count < cfg.max_add_attempts:
+            reason = (
+                f"attempt count {attempt_count}/{cfg.max_add_attempts}; "
+                "configured attempt limit has not been exhausted"
+            )
+            db.set_radarr_blocklist_state(
+                torrent_hash, "skipped_attempt_limit", error=reason, verify_misses=0
+            )
+            logging.warning(
+                "RADARR_BLOCKLIST_SKIPPED source=%s media_id=%s history_id=%s title=%r release=%r attempts=%d/%d reason=attempt-limit-not-exhausted",
+                cfg.name, media_id, history_id, media_title, safe_release_title,
+                attempt_count, cfg.max_add_attempts,
+            )
             continue
 
         # Persist the intent before the side effect. If the process dies after the
@@ -1496,6 +1512,8 @@ def terminal_notification_block(cfg: Config, row: dict[str, Any], *, preparation
                 lines.append(f"Причина блокировки: {blocklist_error}")
         elif blocklist_status == "legacy_skipped":
             lines.append("Блок-лист Radarr: эта ошибка относится к периоду до обновления; автоматическая блокировка задним числом не выполнялась.")
+        elif blocklist_status == "skipped_attempt_limit":
+            lines.append("Блок-лист Radarr: блокировка не выполнялась, поскольку зарегистрировано меньше попыток, чем настроенный лимит; условие исчерпания попыток не выполнено.")
     return "\n".join(lines)
 
 
