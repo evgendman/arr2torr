@@ -176,12 +176,12 @@ target_quality is descriptive configuration data. It represents which Arr lane c
 ### Radarr blocklist behavior in v1.3.2
 
 - The opt-out setting radarr_blocklist_enabled defaults to true for Radarr and is ignored by Sonarr.
-- Only terminal pending_adds failures are selected. Rows still in retry_wait and permanent preparation failures before a TorrServer add are excluded.
+- Only pending_adds rows with status = 'failed' and attempt_count >= max_add_attempts are eligible. A row marked failed by a permanent API rejection before reaching the configured count is saved as skipped_attempt_limit and is not blocklisted. Rows in retry_wait and permanent preparation failures before a TorrServer add are excluded.
 - The importer calls POST /api/v3/history/failed/{arr_history_id} so Radarr can execute its native failed-download event path and add the exact history Grab to the blocklist. This is not a direct POST /api/v3/blocklist operation; the public API has no blocklist creation endpoint.
 - The outcome is persisted in pending_adds.radarr_blocklist_status, radarr_blocklist_last_error, and radarr_blocklist_verify_misses. These columns are added in-place.
 - On first migration, old rows already marked failed are assigned legacy_skipped. This intentionally prevents updating the code from retrospectively acting on a batch of old failures. Newly terminal rows use the default NULL state and are processed.
 - HTTP/network results that do not establish whether Radarr completed the failed-history action enter verify_pending. Later runs query /api/v3/blocklist/movie?movieId=...; because the public resource does not expose a torrent hash, recovery can only compare the source release title. The importer does not automatically repeat the non-idempotent failed-history POST.
-- The blocklist result is appended to the existing terminal Apprise failure summary, when notifications are enabled; separate blocklist-only alerts are not emitted.
+- The blocklist result is appended to the existing terminal Apprise failure summary, when notifications are enabled; separate blocklist-only alerts are not emitted. The skipped_attempt_limit outcome is explained in the same message.
 
 ## 10. Notification state and failure summaries
 
