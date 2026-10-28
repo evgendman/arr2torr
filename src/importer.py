@@ -28,7 +28,7 @@ from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 DEFAULT_PAGE_SIZE = 1000
 DEFAULT_TIMEOUT = 30
 
@@ -85,7 +85,7 @@ class Config:
     state_db: str
     history_page_size: int = DEFAULT_PAGE_SIZE
     timeout: int = DEFAULT_TIMEOUT
-    user_agent: str = "torr-arr-importer/1.3.1"
+    user_agent: str = "torr-arr-importer/1.3.2"
     log_level: str = "INFO"
     log_file: str = ""
     retry_count: int = 2
@@ -373,6 +373,9 @@ class StateDB:
                 last_error TEXT,
                 next_retry_at TEXT,
                 notification_attempted_at TEXT,
+                notification_attempt_count INTEGER NOT NULL DEFAULT 0,
+                notification_next_retry_at TEXT,
+                notification_last_error TEXT,
                 seerr_watchlist_status TEXT,
                 seerr_watchlist_last_error TEXT,
                 seerr_watchlist_error_fingerprint TEXT,
@@ -403,6 +406,9 @@ class StateDB:
                 tvdb_id TEXT,
                 created_at TEXT NOT NULL,
                 notification_attempted_at TEXT,
+                notification_attempt_count INTEGER NOT NULL DEFAULT 0,
+                notification_next_retry_at TEXT,
+                notification_last_error TEXT,
                 seerr_watchlist_status TEXT,
                 seerr_watchlist_last_error TEXT,
                 seerr_watchlist_error_fingerprint TEXT,
@@ -426,6 +432,9 @@ class StateDB:
             "media_title": "TEXT",
             "title_slug": "TEXT",
             "notification_attempted_at": "TEXT",
+            "notification_attempt_count": "INTEGER NOT NULL DEFAULT 0",
+            "notification_next_retry_at": "TEXT",
+            "notification_last_error": "TEXT",
             "seerr_watchlist_status": "TEXT",
             "seerr_watchlist_last_error": "TEXT",
             "seerr_watchlist_error_fingerprint": "TEXT",
@@ -442,6 +451,9 @@ class StateDB:
         terminal_migrations = {
             "tmdb_id": "TEXT",
             "tvdb_id": "TEXT",
+            "notification_attempt_count": "INTEGER NOT NULL DEFAULT 0",
+            "notification_next_retry_at": "TEXT",
+            "notification_last_error": "TEXT",
             "seerr_watchlist_status": "TEXT",
             "seerr_watchlist_last_error": "TEXT",
             "seerr_watchlist_error_fingerprint": "TEXT",
@@ -750,46 +762,91 @@ class StateDB:
             SELECT * FROM pending_adds
             WHERE source = ? AND status = 'failed'
               AND notification_attempted_at IS NULL
+              AND (notification_next_retry_at IS NULL OR notification_next_retry_at <= ?)
             ORDER BY requested_at
             """,
-            (source,),
+            (source, iso_now()),
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [
+            {**dict(row), "record_table": "pending_adds", "record_key": str(row["hash"])}
+            for row in rows
+        ]
 
     def unnotified_terminal_events(self, source: str) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             """
             SELECT * FROM terminal_events
             WHERE source = ? AND notification_attempted_at IS NULL
+              AND (notification_next_retry_at IS NULL OR notification_next_retry_at <= ?)
             ORDER BY created_at
             """,
-            (source,),
+            (source, iso_now()),
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [
+            {**dict(row), "record_table": "terminal_events", "record_key": str(row["event_key"])}
+            for row in rows
+        ]
 
-    def mark_pending_notifications_attempted(self, hashes: list[str]) -> None:
-        if not hashes:
+    def mark_notification_delivered(self, records: list[dict[str, Any]]) -> None:
+        if not records:
             return
         now = iso_now()
-        placeholders = ",".join("?" for _ in hashes)
         with self.conn:
-            self.conn.execute(
-                f"UPDATE pending_adds SET notification_attempted_at = ? "
-                f"WHERE hash IN ({placeholders})",
-                [now, *hashes],
-            )
+            for record in records:
+                table = str(record.get("record_table") or "")
+                if table == "pending_adds":
+                    key_column = "hash"
+                elif table == "terminal_events":
+                    key_column = "event_key"
+                else:
+                    raise ValueError("Unknown terminal-notification record table")
+                self.conn.execute(
+                    f"""
+                    UPDATE {table}
+                    SET notification_attempted_at = ?,
+                        notification_next_retry_at = NULL,
+                        notification_last_error = NULL
+                    WHERE {key_column} = ? AND source = ?
+                    """,
+                    (now, str(record.get("record_key") or ""), str(record.get("source") or "")),
+                )
 
-    def mark_terminal_events_attempted(self, event_keys: list[str]) -> None:
-        if not event_keys:
-            return
-        now = iso_now()
-        placeholders = ",".join("?" for _ in event_keys)
+    def schedule_notification_retry(self, records: list[dict[str, Any]], error: str) -> int:
+        """Durably re-queue undelivered terminal notifications using bounded exponential backoff."""
+        longest_delay = 0
+        now = datetime.now(timezone.utc)
         with self.conn:
-            self.conn.execute(
-                f"UPDATE terminal_events SET notification_attempted_at = ? "
-                f"WHERE event_key IN ({placeholders})",
-                [now, *event_keys],
-            )
+            for record in records:
+                table = str(record.get("record_table") or "")
+                if table == "pending_adds":
+                    key_column = "hash"
+                elif table == "terminal_events":
+                    key_column = "event_key"
+                else:
+                    raise ValueError("Unknown terminal-notification record table")
+                key = str(record.get("record_key") or "")
+                source = str(record.get("source") or "")
+                row = self.conn.execute(
+                    f"SELECT notification_attempt_count FROM {table} WHERE {key_column} = ? AND source = ?",
+                    (key, source),
+                ).fetchone()
+                if row is None:
+                    continue
+                attempt = int(row["notification_attempt_count"] or 0) + 1
+                delay = notification_delivery_retry_delay(attempt)
+                retry_at = (now + timedelta(seconds=delay)).isoformat()
+                self.conn.execute(
+                    f"""
+                    UPDATE {table}
+                    SET notification_attempt_count = ?,
+                        notification_next_retry_at = ?,
+                        notification_last_error = ?
+                    WHERE {key_column} = ? AND source = ? AND notification_attempted_at IS NULL
+                    """,
+                    (attempt, retry_at, safe_notification_text(error, 100), key, source),
+                )
+                longest_delay = max(longest_delay, delay)
+        return longest_delay
 
     def notification_fingerprint(self, state_key: str) -> str | None:
         row = self.conn.execute(
@@ -1142,206 +1199,172 @@ def process_seerr_watchlist(cfg: Config, db: StateDB) -> None:
         "SEERR_WATCHLIST_SUMMARY source=%s candidates=%d requests=%d added=%d already_present=%d errors=%d",
         cfg.name, len(records), considered, added, already_present, errors,
     )
-    dispatch_seerr_watchlist_notifications(cfg, db)
 
 
-def _seerr_watchlist_lines(records: list[dict[str, Any]], cfg: Config, *, errors: bool = False) -> list[str]:
-    grouped: dict[tuple[str, int | None], dict[str, Any]] = {}
-    for record in records:
-        tmdb_id = as_int(record.get("tmdb_id"))
-        key = (cfg.category, tmdb_id)
-        item = grouped.setdefault(key, {"titles": [], "releases": [], "statuses": [], "errors": []})
-        title = str(record.get("media_title") or record.get("release_title") or "Неизвестный элемент")
-        if title not in item["titles"]:
-            item["titles"].append(title)
-        release = str(record.get("release_title") or "")
-        if release and release not in item["releases"]:
-            item["releases"].append(release)
-        item["statuses"].append(str(record.get("seerr_watchlist_status") or ""))
-        error = str(record.get("seerr_watchlist_last_error") or "")
-        if error and error not in item["errors"]:
-            item["errors"].append(error)
-
-    lines: list[str] = []
-    media_label = "Сериал" if cfg.category == "tv" else "Фильм"
-    for (_media_type, tmdb_id), item in grouped.items():
-        title = safe_notification_text(item["titles"][0], 150)
-        suffix = f" (TMDb {tmdb_id})" if tmdb_id else ""
-        if errors:
-            reason = safe_notification_text(item["errors"][0] if item["errors"] else "неизвестная ошибка", 220)
-            lines.append(f"• {media_label}: {title}{suffix} — не удалось зарегистрировать в Watchlist Seerr: {reason}")
-        else:
-            states = set(item["statuses"])
-            where = "уже находился" if states == {"already_present"} else "добавлен или уже находился"
-            releases = "; ".join(safe_notification_text(v, 100) for v in item["releases"][:2])
-            extra = f"; раздача: {releases}" if releases else ""
-            lines.append(f"• {media_label}: {title}{suffix} — {where} в Watchlist администратора Seerr{extra}")
-    return lines
+def notification_delivery_retry_delay(attempt: int) -> int:
+    # Retry delivery independently from torrent adds. The systemd timer may make
+    # actual retries less frequent; state survives restarts and an Apprise outage.
+    delays = (60, 300, 900, 1800, 3600)
+    return delays[min(max(1, int(attempt)) - 1, len(delays) - 1)]
 
 
-def _chunk_notification_lines(intro: str, lines: list[str], limit: int = 3000) -> list[str]:
-    chunks: list[str] = []
-    current: list[str] = []
-    for line in lines:
-        candidate = intro + "\n\n" + "\n".join(current + [line])
-        if current and len(candidate) > limit:
-            chunks.append(intro + "\n\n" + "\n".join(current))
-            current = [line]
-        else:
-            current.append(line)
-    if current:
-        chunks.append(intro + "\n\n" + "\n".join(current))
-    return chunks
+def human_failure_reason(value: Any) -> str:
+    raw = str(value or "").strip()
+    lowered = raw.lower()
+    http = re.search(r"\bHTTP\s+(\d{3})\b", raw, flags=re.IGNORECASE)
+    code = int(http.group(1)) if http else None
+
+    if code == 410 and ("download url" in lowered or "resolving" in lowered):
+        return "ссылка на выбранную раздачу больше недоступна (HTTP 410); запрос добавления в TorrServer не выполнялся"
+    if code in {401, 403}:
+        return f"сервис отклонил запрос из-за авторизации (HTTP {code})"
+    if code == 404 and ("download" in lowered or "url" in lowered):
+        return "ссылка на выбранную раздачу не найдена (HTTP 404)"
+    if "verification deadline expired" in lowered:
+        if "absent-from-list" in lowered:
+            return "TorrServer не подтвердил появление раздачи в своём списке за отведённое время"
+        return "TorrServer не подтвердил готовность раздачи за отведённое время"
+    if "connection refused" in lowered:
+        return "не удалось подключиться к TorrServer: соединение отклонено"
+    if "timed out" in lowered or "timeout" in lowered:
+        if "download url" in lowered or "resolve" in lowered:
+            return "истекло время ожидания при получении ссылки на раздачу"
+        return "истекло время ожидания ответа от TorrServer"
+    if "name or service not known" in lowered or "temporary failure in name resolution" in lowered:
+        return "не удалось определить адрес одного из сервисов"
+    if code is not None:
+        return f"сервис вернул HTTP {code}"
+    return safe_notification_text(raw, 180)
 
 
-def dispatch_seerr_watchlist_notifications(cfg: Config, db: StateDB) -> None:
-    if not cfg.notifications_enabled:
-        return
-    warning_rows = db.seerr_watchlist_warning_rows(cfg.name)
-    if warning_rows:
-        intro = (
-            "Передача этих медиа на TorrServer завершилась окончательной ошибкой. "
-            "Элементы зарегистрированы (или уже находились) в Watchlist администратора Seerr для контроля и разбирательства. "
-            "Наличие в Watchlist не означает, что медиа уже доступно для просмотра."
-        )
-        for index, body in enumerate(_chunk_notification_lines(
-            intro, _seerr_watchlist_lines(warning_rows, cfg)
-        ), start=1):
-            suffix = f" ({index})" if len(warning_rows) > 1 else ""
-            apprise_notify(
-                cfg, f"{cfg.service_name} — Сбой TorrServer зарегистрирован в Seerr{suffix}",
-                body, "warning", cfg.notification_tag_warning,
-            )
-        db.mark_seerr_watchlist_warnings_notified(warning_rows)
-
-    error_rows = db.seerr_watchlist_error_rows(cfg.name)
-    if error_rows:
-        intro = (
-            "arr2torr не смог зарегистрировать окончательный сбой TorrServer в Watchlist Seerr. "
-            "Элемент требует проверки конфигурации, идентификатора или доступности Seerr."
-        )
-        for index, body in enumerate(_chunk_notification_lines(
-            intro, _seerr_watchlist_lines(error_rows, cfg, errors=True)
-        ), start=1):
-            suffix = f" ({index})" if len(error_rows) > 1 else ""
-            apprise_notify(
-                cfg, f"{cfg.service_name} — Ошибка регистрации в Seerr{suffix}",
-                body, "failure", cfg.notification_tag_critical,
-            )
-        db.mark_seerr_watchlist_errors_notified(error_rows)
-
-
-def retry_warning_fingerprint(rows: list[dict[str, Any]]) -> tuple[str, str]:
-    if not rows:
-        return "", ""
-    attempts: dict[int, int] = {}
-    for row in rows:
-        count = int(row.get("attempt_count") or 0)
-        attempts[count] = attempts.get(count, 0) + 1
-    fingerprint = json.dumps(
-        {"count": len(rows), "attempts": sorted(attempts.items())},
-        separators=(",", ":"),
-    )
-    attempt_summary = ", ".join(
-        f"{number} попытка: {count}" for number, count in sorted(attempts.items())
-    )
-    return fingerprint, attempt_summary
+def human_seerr_error(value: Any) -> str:
+    raw = str(value or "").strip()
+    lowered = raw.lower()
+    http = re.search(r"\bHTTP\s+(\d{3})\b", raw, flags=re.IGNORECASE)
+    code = int(http.group(1)) if http else None
+    if code in {401, 403}:
+        return f"Seerr отклонил авторизацию (HTTP {code})"
+    if code is not None and code >= 500:
+        return f"Seerr временно недоступен (HTTP {code}); arr2torr повторит регистрацию"
+    if "timeout" in lowered or "timed out" in lowered or "urlerror" in lowered:
+        return "Seerr не ответил; arr2torr повторит регистрацию"
+    return safe_notification_text(raw, 160)
 
 
 def terminal_notification_block(cfg: Config, row: dict[str, Any], *, preparation: bool = False) -> str:
     media_title = safe_notification_text(
-        row.get("media_title") or row.get("title") or row.get("release_title") or "Неизвестный элемент",
-        180,
+        row.get("media_title") or row.get("title") or row.get("release_title") or "Неизвестное медиа",
+        160,
     )
-    release_title = safe_notification_text(row.get("release_title") or row.get("title") or "", 220)
-    lines = [f"{'Фильм' if cfg.category == 'movie' else 'Сериал'}: {media_title}"]
+    release_title = safe_notification_text(row.get("release_title") or row.get("title") or "", 200)
+    media_label = "Фильм" if cfg.category == "movie" else "Сериал"
+    lines = [f"{media_label}: {media_title}"]
     if release_title and release_title != media_title:
-        lines.append(f"Релиз: {release_title}")
-    if preparation:
-        lines.append("Этап: подготовка ссылки (до обращения к TorrServer)")
-    else:
+        lines.append(f"Выбранная раздача: {release_title}")
+
+    lines.append("Не удалось добавить выбранную раздачу в TorrServer.")
+    reason = row.get("reason") if preparation else (row.get("reason") or row.get("last_error"))
+    lines.append(f"Причина: {human_failure_reason(reason)}")
+
+    if not preparation:
         attempts = int(row.get("attempt_count") or 0)
-        reason = str(row.get("last_error") or row.get("reason") or "")
-        if permanent_preparation_error(ImporterError(reason)):
-            lines.append(f"Попытки выполнены: {attempts}; повтор прекращён из-за постоянной ошибки")
+        lines.append(f"Автоматические попытки закончились ({attempts} из {cfg.max_add_attempts}).")
+
+    arr_label = "Radarr" if cfg.arr_type == "radarr" else "Sonarr"
+    lines.append(f"Советуем выбрать другую раздачу в {arr_label} и нажать Grab.")
+
+    if cfg.seerr_watchlist_enabled:
+        status = str(row.get("seerr_watchlist_status") or "")
+        if status == "added":
+            lines.append(f"{media_label} добавлен в Watchlist администратора Seerr." if cfg.category == "movie" else "Сериал добавлен в Watchlist администратора Seerr.")
+        elif status == "already_present":
+            lines.append(f"{media_label} уже есть в Watchlist администратора Seerr." if cfg.category == "movie" else "Сериал уже есть в Watchlist администратора Seerr.")
+        elif status == "missing_tmdb_id":
+            lines.append(f"Не удалось добавить {media_label.lower()} в Watchlist Seerr: в данных нет TMDb ID.")
+        elif status == "error":
+            seerr_error = human_seerr_error(row.get("seerr_watchlist_last_error"))
+            lines.append(f"Не удалось добавить {media_label.lower()} в Watchlist Seerr: {seerr_error}.")
         else:
-            lines.append(f"Попытки добавления/проверки: {attempts}/{cfg.max_add_attempts}")
-        lines.append("Этап: добавление или подтверждение в TorrServer")
-    reason_text = safe_notification_text(row.get("reason") or row.get("last_error") or "", 180)
-    lines.append(f"Причина: {reason_text}")
+            lines.append(f"Не удалось проверить статус {media_label.lower()} в Watchlist Seerr; arr2torr попробует снова.")
+
     link = arr_card_url(cfg, row.get("title_slug"))
     if link:
-        lines.append(f"Карточка Arr: {link}")
+        lines.append(f"Карточка в {arr_label}: {link}")
     return "\n".join(lines)
 
 
-def chunk_terminal_blocks(cfg: Config, blocks: list[str], limit: int = 3300) -> list[str]:
-    intro = (
-        f"Инстанс: {cfg.name}. Терминальных ошибок в этой сводке: {len(blocks)}.\n"
-        f"Подробности журнала: journalctl -u torr-arr-importer@{cfg.name}.service -n 100 --no-pager"
-    )
-    chunks: list[str] = []
-    current: list[str] = []
-    for block in blocks:
-        candidate = intro + "\n\n" + "\n\n".join(current + [block])
+def chunk_terminal_records(
+    cfg: Config, records: list[dict[str, Any]], limit: int = 3250
+) -> list[list[dict[str, Any]]]:
+    """Split a large terminal batch into the fewest messages that fit the Telegram-size budget."""
+    service = safe_notification_text(cfg.service_name or cfg.name, 140)
+    intro = f"{service}\nОкончательные ошибки передачи в TorrServer: {len(records)}."
+    chunks: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for record in records:
+        candidate_rows = current + [record]
+        candidate = intro + "\n\n" + "\n\n".join(
+            terminal_notification_block(cfg, item, preparation=item.get("record_table") == "terminal_events")
+            for item in candidate_rows
+        )
         if current and len(candidate) > limit:
-            chunks.append(intro + "\n\n" + "\n\n".join(current))
-            current = [block]
+            chunks.append(current)
+            current = [record]
         else:
-            current.append(block)
+            current.append(record)
     if current:
-        chunks.append(intro + "\n\n" + "\n\n".join(current))
+        chunks.append(current)
     return chunks
 
 
+def terminal_notification_body(
+    cfg: Config, records: list[dict[str, Any]], total_count: int, part: int, parts: int
+) -> str:
+    service = safe_notification_text(cfg.service_name or cfg.name, 140)
+    lines = [service, f"Окончательные ошибки передачи в TorrServer: {total_count}."]
+    if parts > 1:
+        lines.append(f"Часть {part} из {parts}.")
+    lines.extend(
+        terminal_notification_block(cfg, row, preparation=row.get("record_table") == "terminal_events")
+        for row in records
+    )
+    return "\n\n".join(lines)
+
+
 def dispatch_notifications(cfg: Config, db: StateDB) -> None:
-    # Retry warnings contain counts only; their fingerprint deliberately excludes item identity.
-    retry_rows = [
-        row for row in db.pending_rows(source=cfg.name)
-        if row.get("status") == "retry_wait"
+    # Interim retry states stay in the journal. Telegram is reserved for terminal,
+    # actionable failures, one grouped critical message per batch.
+    records = [
+        *db.unnotified_terminal_failures(cfg.name),
+        *db.unnotified_terminal_events(cfg.name),
     ]
-    fingerprint, attempt_summary = retry_warning_fingerprint(retry_rows)
-    state_key = f"{cfg.name}:retry_wait"
-    previous = db.notification_fingerprint(state_key)
-    if fingerprint and fingerprint != previous and cfg.notifications_enabled:
-        distribution = f" Распределение попыток: {attempt_summary}." if attempt_summary else ""
-        body = (
-            f"Инстанс {cfg.name}: {len(retry_rows)} проблемных раздач ожидают повторной попытки."
-            f"{distribution} Названия и идентификаторы элементов не включены; подробности находятся в локальном журнале."
-        )
-        apprise_notify(
-            cfg, f"{cfg.service_name} — Проблемы передачи (ожидается повтор)",
-            body, "warning", cfg.notification_tag_warning,
-        )
-    # Update after every enabled run even when delivery fails. While disabled, keep
-    # an empty baseline so enabling notifications later can report an ongoing issue.
-    db.set_notification_fingerprint(state_key, fingerprint if cfg.notifications_enabled else "")
-
-    failed_rows = db.unnotified_terminal_failures(cfg.name)
-    terminal_events = db.unnotified_terminal_events(cfg.name)
-    if not failed_rows and not terminal_events:
+    if not records:
         return
-
-    blocks = [terminal_notification_block(cfg, row) for row in failed_rows]
-    blocks.extend(terminal_notification_block(cfg, row, preparation=True) for row in terminal_events)
-    chunks = chunk_terminal_blocks(cfg, blocks)
-    if cfg.notifications_enabled:
-        for index, body in enumerate(chunks, start=1):
-            suffix = f" ({index}/{len(chunks)})" if len(chunks) > 1 else ""
-            apprise_notify(
-                cfg, f"{cfg.service_name} — Ошибка передачи релиза{suffix}",
-                body, "failure", cfg.notification_tag_critical,
-            )
-        # Mark after at most one delivery attempt, including HTTP failure; do not
-        # retry terminal messages indefinitely. Disabled notifications are not an
-        # attempt: leave new events pending so turning notifications on can deliver them.
-        db.mark_pending_notifications_attempted([str(row["hash"]) for row in failed_rows])
-        db.mark_terminal_events_attempted([str(row["event_key"]) for row in terminal_events])
-    else:
+    if not cfg.notifications_enabled:
         logging.info(
             "APPRISE_SKIPPED source=%s reason=notifications-disabled terminal_items=%d",
-            cfg.name, len(blocks),
+            cfg.name, len(records),
         )
+        return
+
+    chunks = chunk_terminal_records(cfg, records)
+    for index, chunk in enumerate(chunks, start=1):
+        body = terminal_notification_body(cfg, chunk, len(records), index, len(chunks))
+        suffix = f" (часть {index}/{len(chunks)})" if len(chunks) > 1 else ""
+        noun = "раздачу" if len(records) == 1 else "выбранные раздачи"
+        title = f"{cfg.service_name} — Не удалось добавить {noun} в TorrServer{suffix}"
+        if apprise_notify(cfg, title, body, "failure", cfg.notification_tag_critical):
+            db.mark_notification_delivered(chunk)
+            logging.info(
+                "APPRISE_TERMINAL_DELIVERED source=%s items=%d part=%d/%d",
+                cfg.name, len(chunk), index, len(chunks),
+            )
+        else:
+            delay = db.schedule_notification_retry(chunk, "apprise_delivery_failed")
+            logging.warning(
+                "APPRISE_TERMINAL_RETRY_QUEUED source=%s items=%d part=%d/%d retry_in_sec=%d",
+                cfg.name, len(chunk), index, len(chunks), delay,
+            )
 
 
 def as_int(value: Any) -> int | None:
@@ -1888,9 +1911,9 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                 sleep_for = min(sleep_for, max(0.1, min(remaining)))
             time.sleep(sleep_for)
 
-        dispatch_notifications(cfg, db)
         if cfg.seerr_watchlist_enabled:
             process_seerr_watchlist(cfg, db)
+        dispatch_notifications(cfg, db)
         pending_count = len(db.pending_rows())
         logging.info(
             "DONE source=%s candidates=%d submitted=%d added=%d failed=%d pending=%d "
@@ -1927,7 +1950,7 @@ def config_from_file(path: str) -> Config:
         state_db=str(raw.get("state_db", "/var/lib/torr-arr-importer/state.db")),
         history_page_size=int(raw.get("history_page_size", DEFAULT_PAGE_SIZE)),
         timeout=int(raw.get("timeout", DEFAULT_TIMEOUT)),
-        user_agent=str(raw.get("user_agent", "torr-arr-importer/1.3.1")),
+        user_agent=str(raw.get("user_agent", "torr-arr-importer/1.3.2")),
         log_level=str(raw.get("log_level", "INFO")).upper(),
         log_file=str(raw.get("log_file", "")),
         retry_count=int(raw.get("retry_count", 2)),
