@@ -166,9 +166,9 @@ Set it to false to disable it. It has no effect in Sonarr profiles. Retries stil
 
 The SQLite migration is in-place. Failed rows that already existed before the new column was added are marked legacy_skipped, so upgrading does not send a large batch of historical failures to Radarr. New terminal failures are handled automatically. --retry-failed resets this state when an exhausted TorrServer attempt is deliberately re-armed.
 
-The final grouped Apprise failure message (if notifications are enabled) includes the actual blocklist outcome, and the service log records the detail. An ambiguous HTTP/network result is checked read-only on later timer runs rather than blindly resending Radarr's failed-history action, because that action can trigger duplicate side effects.
+The final grouped Apprise failure message includes the actual blocklist outcome, and the service log records the detail. An ambiguous HTTP/network result is checked read-only on later timer runs rather than blindly resending Radarr's failed-history action, because that action can trigger duplicate side effects.
 
-## Optional Apprise notifications (v1.2.0)
+## Optional Apprise notifications (terminal-only revision)
 
 Notifications are disabled by default and use the shared Apprise API, not a direct Telegram connection. Add the following flat TOML keys to each instance that should notify. Replace placeholders with values reachable from the Telegram client; do not add a bot token, chat ID or topic ID here.
 
@@ -185,11 +185,13 @@ Set `service_name` separately in each config, e.g. `arr2torr / Sonarr 1080p`; se
 
 The current deployed setup only has the 1080p Radarr and Sonarr timers active; keep 4K instance notifications disabled unless those instances are deliberately brought into service.
 
-Behavior:
-- A warning goes to `warnings` and contains only counts and add-attempt distribution for items awaiting automatic retry; it contains no names, hashes or item identifiers.
-- A final message goes to `critical` when an add/verification attempt becomes terminal or a permanent HTTP 4xx failure is encountered before the TorrServer add. Newly terminal items are grouped into as few messages as practical; each item includes its media title, release title when available, a sanitized cause, attempt information and an optional Arr card link.
-- The fingerprint for retry warnings and the one-time terminal-notification marker live in the shared SQLite database. Existing `failed` rows present before the v1.2.0 migration are baselined so an upgrade does not dump old failures into Telegram.
-- An Apprise outage is logged locally only; the importer does not fail solely because notification delivery failed and does not retry the same terminal alert indefinitely.
+Behavior in the terminal-only notification revision:
+- No Telegram message is sent while a TorrServer add is pending or waiting for an automatic retry; the user cannot act usefully until automatic attempts are exhausted.
+- A single grouped message goes to critical when add/verification becomes terminal or a permanent preparation error is encountered before the TorrServer add. Each item includes its media and selected-release titles, a plain-language cause, attempts used or permanent-error context, advice to choose another release, and the Arr card link when available.
+- If Seerr Watchlist is enabled, the same critical message states whether the media was added/already present or whether registration could not be confirmed. There is no second Seerr warning or separate retry-warning message.
+- The existing SQLite database stores notification attempt count and next retry time. A terminal event is marked delivered only after Apprise returns HTTP 2xx; failed deliveries retry with persisted delays capped at one hour.
+- Notification delivery errors are logged but do not change transfer state or cause recursive alerts. Because a timeout can follow successful acceptance by Apprise, retries are at-least-once and can rarely produce a duplicate.
+- The old notification_tag_warning config key remains accepted for compatibility but is not used to send user notifications.
 
 
 ## Optional Seerr Watchlist integration (v1.3.0)
@@ -210,10 +212,7 @@ Both files should keep `seerr_watchlist_enabled = false` until the real API key 
 
 When enabled, the importer selects only terminal `failed` rows for the current Arr instance and adds their existing TMDb IDs to `POST /api/v1/watchlist`. Series are registered as a whole title. Missing IDs are reported rather than looked up externally. The feature does not create a Seerr media request, intentionally alter Arr monitoring, or initiate a second Arr search.
 
-Notifications reuse the existing Apprise config:
-- After a failure is represented in Watchlist (including a duplicate whose presence is verified), send type `warning` to tag `warnings`. Explain that TorrServer transfer failed and the item is listed in the administrator's Seerr Watchlist for manual investigation; this is not a media-available notice.
-- If registration itself fails, send type `failure` to tag `critical`.
-- Watchlist state and notification fingerprints are stored in the existing SQLite database. API/network errors can retry on later timer runs; unchanged error alerts are deduplicated.
+Notifications reuse the existing Apprise config. Watchlist processing does not emit a separate message: its latest status is included in the one terminal critical transfer-failure alert. Confirmed registration is described naturally as media added to the administrator's Seerr Watchlist; if the entry was already there, the message says so. If registration cannot be confirmed, that problem is stated instead, and retryable Seerr API errors remain eligible for later timer runs.
 
 ### Safe activation sequence
 

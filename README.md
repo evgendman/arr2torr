@@ -80,11 +80,13 @@ Verification means observable readiness or database presence; it does not claim 
 
 Default verification settings are verification_timeout_sec = 120, verification_poll_interval_sec = 3.0, retry_backoff_sec = 60 (doubling per failed attempt, capped at one hour), and max_add_attempts = 3. Compare the timeout with the TorrentDisconnectTimeout setting of the installed TorrServer build.
 
-## Aggregated Apprise notifications (v1.2.0)
+## Final-failure Apprise notifications (next revision)
 
-Notifications are opt-in through the shared Apprise API; the importer does not store Telegram tokens, chat IDs or topic IDs. For eligible instances, numeric-only warnings are sent when the retry-wait count or attempt distribution changes. When an item reaches a terminal failure, the importer groups newly failed items into a critical message containing the movie/series title, release title if available, attempts used, a sanitized reason and an optional direct Arr card link when `arr_ui_url` and Arr's `titleSlug` are available.
+Notifications are opt-in and use the shared Apprise API; arr2torr never stores Telegram tokens, chat IDs or topic IDs. **There are no Telegram messages while an item is still waiting for an automatic add/verification retry.** The importer waits until the failure is terminal (all configured add attempts are exhausted, or a permanent error makes retry impossible).
 
-Notification state is stored in the existing SQLite database to avoid repeating the same warnings or terminal alerts on every timer run. Apprise calls use a bounded timeout, are attempted at most once for a terminal group, and never change the import result. Notifications default to disabled in configuration examples. See [Installation and configuration](docs/INSTALLATION.md) and [Operations](docs/OPERATIONS.md).
+The final message goes to the critical tag and brings the entire action-oriented summary together: movie/series title, selected release, plain-language reason, attempts used, recommendation to choose another release in Radarr/Sonarr, and a direct Arr card link when available. When Seerr Watchlist integration is enabled, the same message reports whether the media was added, was already listed, or could not be registered. There is no second warning or Watchlist message for the same failure.
+
+Terminal notification state is stored in the existing SQLite database and is migrated in place. An unsuccessful Apprise request leaves the message pending and schedules another attempt with increasing delays (1, 5, 15, 30 and then 60 minutes, capped at one hour). A successful 2xx response marks the notification delivered. This is at-least-once delivery: if Apprise accepts a request but its response is lost, a retry can result in a duplicate. Delivery failures never change the TorrServer import result. Notifications remain disabled in example configs by default. See [Installation and configuration](docs/INSTALLATION.md) and [Operations](docs/OPERATIONS.md).
 
 ## Automatic Radarr blocklist after terminal transfer failure (v1.3.2)
 
@@ -105,9 +107,9 @@ The optional Seerr integration registers a movie or whole series in the administ
 - Requires `seerr_url` and `seerr_api_key`. API-key requests use Seerr's administrator account (user ID 1) unless an explicit user override is sent; this integration does not send one.
 - Reads terminal `failed` rows from `pending_adds` and permanent `terminal_events` for the current Arr instance. `pending` and `retry_wait` are ignored.
 - Uses only the TMDb ID already stored in arr2torr. Missing IDs are recorded and reported; there is no separate metadata lookup.
-- Success/verified-existing items produce a grouped Apprise `warnings` message explaining that the TorrServer transfer failed and the item is tracked in Seerr for troubleshooting. Failure to register it produces an Apprise `critical` message.
+- The Seerr registration result is included in the same final critical transfer-failure message; there is no separate warnings or Seerr notification. A successful or verified-existing Watchlist entry is described naturally, while registration errors are reported honestly and are retried by the integration where applicable.
 - Watchlist processing state is stored in additional SQLite columns and is migrated in place. The import history and original TorrServer failure state remain intact.
-- The success notification is not an availability notification: a Watchlist item is **not necessarily available to watch**.
+- The Seerr Watchlist is used as an administrator reminder list for failed transfers; it does not create a Seerr media request.
 
 The setting is off in all example configs until a real key is supplied and the operator enables it. Configure only the two active 1080p profiles unless the 4K instances are intentionally brought into use.
 
@@ -205,8 +207,8 @@ The current code package is **torr-arr-importer v1.3.2**. It uses Python 3.11+ a
 
 ## Current status
 
-The last confirmed live deployment on MINI-Ubuntu is **torr-arr-importer v1.3.1**. Version **v1.3.2** is prepared in [PR #4](https://github.com/evgendman/arr2torr/pull/4). GitHub Actions passes 40 tests on Python 3.11 and 40 tests on Python 3.12.
+The installed MINI-Ubuntu file currently reports version 1.3.2 and exactly matches the feat/terminal-only-notifications branch. It includes the terminal-only notification redesign and durable Apprise-delivery retries, but does not include Radarr blocklisting.
 
-The new version defaults `radarr_blocklist_enabled` to `true`. It sends a release to Radarr's native failed-download handling only after `max_add_attempts` has been reached for a TorrServer add/verification failure. Intermediate retries, failed attempts below the configured limit, pre-add preparation failures, and Sonarr remain outside this behavior.
+PR #4 adds default-enabled Radarr blocklisting only after the configured TorrServer add/verification attempt limit is exhausted. A source comparison found that the original PR branch did not include the notification changes present in the installed file. The combined candidate is being reconciled and must pass a fresh full test run and CI before installation.
 
-**v1.3.2 has not been deployed or live-validated against Radarr.** A deliberately selected test Grab must confirm the native failed-history/blocklist behavior before production deployment. Preparing this PR did not change the live MINI-Ubuntu source file, configs, SQLite database, or systemd timers.
+The blocklisting behavior is not yet live-validated against Radarr. Before re-enabling production timers, a deliberately selected test Grab should confirm the native failed-history endpoint behavior. Existing live configuration, SQLite state and systemd units must be preserved.

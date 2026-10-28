@@ -84,20 +84,17 @@ The blocklist outcome is appended to the existing grouped terminal Apprise failu
 
 ## Seerr Watchlist tracking (v1.3.0)
 
-When `seerr_watchlist_enabled = true`, the importer also processes terminal failures stored in `pending_adds` (`status = 'failed'`) and permanent `terminal_events` for the current Arr instance.
+When seerr_watchlist_enabled = true, terminal TorrServer failures in pending_adds and permanent preparation errors in terminal_events are registered in the administrator's Seerr Watchlist. The feature adds an attention marker only; it does not create a Seerr media request or trigger a Radarr/Sonarr search.
 
-Look for these log events:
-- `SEERR_WATCHLIST_ADDED`: added to the Seerr Watchlist.
-- `SEERR_WATCHLIST_ALREADY_PRESENT`: Seerr returned 409 and the exact local Watchlist entry was verified.
-- `SEERR_WATCHLIST_FAILED`: registration failed or the TMDb ID is missing.
-- `SEERR_WATCHLIST_SUMMARY`: per-run counts.
+Useful local journal events:
+- SEERR_WATCHLIST_ADDED: added to the Seerr Watchlist.
+- SEERR_WATCHLIST_ALREADY_PRESENT: Seerr returned 409 and the exact administrator Watchlist entry was verified.
+- SEERR_WATCHLIST_FAILED: registration failed or the TMDb ID is missing.
+- SEERR_WATCHLIST_SUMMARY: per-run counts.
 
-Watchlist state is stored in extra columns in the existing SQLite database. Do not delete the state database to reset Watchlist behavior. A row already registered is skipped in later runs; retryable API errors are retried, but identical error notification fingerprints are deduplicated. The integration never uses the Seerr request endpoint and never deliberately triggers a Radarr/Sonarr search.
+The Watchlist state is stored in the existing SQLite database. Do not delete the database to reset notification behavior. Retryable Seerr errors can be retried on later timer runs.
 
-Notifications:
-- The new `warnings` alert means TorrServer transfer reached terminal failure and the item is registered in the administrator's Seerr Watchlist for follow-up; it does **not** mean the item is available in Jellyfin.
-- The new `critical` alert means the importer could not register the failure in Seerr (for example, missing TMDb ID, bad API key or Seerr outage).
-- The original terminal transfer failure alert on `critical` remains unchanged; the Seerr warning is an additional status that confirms whether the failure is visible in the Watchlist.
+**Telegram behavior:** there is no separate Watchlist warning. The result is added to the single final critical transfer-failure message: the text says the item was added/already present only when that status is confirmed, and reports a registration problem otherwise. The user is also given the Arr card link and advised to choose another release. If Seerr is temporarily unavailable, the message reports that registration could not be confirmed and that arr2torr will retry it; no duplicate follow-up message is sent.
 
 ## Why a release was not added
 
@@ -141,21 +138,20 @@ Verification means observable readiness (usable FileStats or working status) or 
 - A Prowlarr download URL may contain an API key in its query string. The importer redacts common API-key query parameters in logs and does not save the original downloadUrl into TorrServer metadata.
 - HTTP 401/403 and other permanent 4xx failures are not retried repeatedly. HTTP 408, 429, 5xx and transient network failures are retryable.
 
-## Apprise notifications (v1.2.0)
+## Apprise notifications (terminal-only)
 
-The importer sends only aggregated events through the shared Apprise API:
+The importer sends one user-facing notification type: a grouped final critical message (type=failure). There is **no notification for pending or retry_wait** and no separate Seerr Watchlist alert. Automatic retries remain visible in the local journal but are silent in Telegram until the failure is terminal or a permanent preparation error prevents the add.
 
-- `warnings` / `warning`: an updated numeric snapshot of attempts currently waiting for automatic retry. No title, release name, hash or media ID is included. Unchanged snapshots are suppressed across timer cycles.
-- `critical` / `failure`: a grouped summary of newly terminal add/verification failures and permanent non-retryable HTTP 4xx preparation failures. It includes the human-readable title, release title when available, a short sanitized cause, add/verification attempts, and a best-effort Arr card link if `arr_ui_url` and `titleSlug` are available.
+Each final item includes the media title, selected release title where available, a human-readable reason, attempts used or a permanent-error explanation, the recommendation to choose another release, an optional direct Radarr/Sonarr card link, and the Seerr Watchlist result if that integration is enabled. Large batches are split only as needed to respect message limits; records without TMDb IDs are not merged together.
 
-The shared `state.db` now also stores notification fingerprints and one-time terminal alert markers. Do not remove/reset it to troubleshoot notifications; doing so also erases importer history and deliberate-removal memory. Terminal alerts are marked attempted after one send attempt, even if Apprise is offline, so delivery failure does not create an endless alert loop.
+Delivery state is stored additively in the existing state.db (notification_attempt_count, notification_next_retry_at, notification_last_error, and notification_attempted_at on terminal rows). A row is marked delivered only after Apprise returns HTTP 2xx. Failed sends are retried using persisted delays of 1, 5, 15, 30 and then 60 minutes (one-hour cap), and survive process restarts. Delivery failure does not alter import state or fail the importer solely by itself. This is at-least-once delivery: a timed-out request may have been accepted by Apprise before the response was lost, so a retry can occasionally duplicate a message.
 
-Check local logs for delivery diagnostics:
+Check local diagnostics:
 
     journalctl -u torr-arr-importer@radarr-1080.service -n 150 --no-pager
-    grep -E 'APPRISE_(SENT|FAILED|SKIPPED)' /var/log/torr-arr-importer/radarr-1080.log
+    grep -E 'APPRISE_(SENT|FAILED|SKIPPED|TERMINAL_)' /var/log/torr-arr-importer/radarr-1080.log
 
-A valid configuration is opt-in and contains `notifications_enabled = true`, `apprise_url`, `apprise_config_key = "arr-stack"`, a stable `service_name`, a short timeout and the `critical`/`warnings` tags. Telegram credentials and topic IDs belong only in Apprise. If notification delivery fails, main import/retry state is still authoritative.
+A valid configuration is opt-in and contains notifications_enabled = true, apprise_url, apprise_config_key = "arr-stack", a stable service_name, a short timeout and notification_tag_critical = "critical". The old notification_tag_warning field is still accepted for compatibility but is no longer used to send user notifications. Telegram credentials and topic IDs belong only in Apprise.
 
 ## Timers and overlapping runs
 
