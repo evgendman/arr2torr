@@ -320,48 +320,47 @@ The importer already preserves provider IDs and selected Arr fields in TorrServe
 4. **Handle `The Prestige` separately.** Its `HTTP 410` is a stale/unavailable Arr history download URL; re-grab or refresh the release in Radarr if still wanted. A TorrServer retry cannot repair a URL that fails before the add call.
 5. Use `--retry-failed` only as a deliberate recovery action after checking current swarm/source availability, not as a routine diagnostic step.
 
-### 10. Optionally block terminally failed Radarr releases in the Radarr blocklist
+### 10. Automatically blocklist terminally failed Radarr releases
 
-**Status: planned.**
+**Status: implementation added in v1.3.2; CI and controlled live Radarr validation remain to be confirmed.**
 
 **Goal**
 
-Optionally prevent Radarr from selecting the same release again after arr2torr has definitively failed to add/verify that release in TorrServer. This must be an explicit policy setting: users who do not enable it retain the current behavior.
+Reduce manual intervention by automatically excluding a release from future Radarr selection after arr2torr has exhausted its TorrServer add/verification attempts, allowing Radarr's own failed-download handling to search for a workable alternative according to its settings.
 
 **Configuration and scope**
 
-- Add a per-instance TOML flag to enable or disable this behavior; default it to `false` for backward compatibility. Choose and document the final setting name during implementation.
-- Apply the feature to Radarr only. Do not change Sonarr behavior as part of this work unless that scope is explicitly extended later.
-- Before implementation, inspect the existing importer and the supported API behavior of the deployed Radarr version. Confirm that the operation targets the exact failed release in Radarr's blocklist, not the movie generally, and does not trigger another search or change monitoring settings.
+- Add radarr_blocklist_enabled, defaulting to true in the code and in Radarr example configs. Set it to false to opt out.
+- Apply this feature to Radarr only. Sonarr behavior remains unchanged.
+- Use the supported native endpoint POST /api/v3/history/failed/{historyId} for the exact Grab history record. The current Radarr API does not expose a direct blocklist-creation POST endpoint; do not invent POST /api/v3/blocklist.
+- This native failed-history action deliberately invokes Radarr's ordinary failure pipeline; any replacement search follows the user's Radarr settings.
 
 **Trigger and safety rules**
 
-- Attempt the blocklist action only when the TorrServer add/verification workflow reaches terminal failure because its configured add attempts have been exhausted.
-- Do not block on an interim retry warning, a temporary error while another automatic attempt remains, or a failure that occurred before an add attempt (for example, a download URL preparation error). Such cases must not be described as a dead release by this feature.
-- Preserve the existing retry limit, retry/backoff policy and terminal-failure classification. A blocklist action must not convert an unverified add into a successful TorrServer import.
-- Make the action idempotent and persist or reliably derive its outcome so ordinary timer runs do not repeatedly reapply the same terminal action. Handle an already-blocklisted release explicitly as an idempotent outcome.
-- If Radarr cannot safely identify or block the exact release, do not silently block a broader entity. Record the reason and report that the blocklist action did not succeed.
+- Process only pending_adds rows that have reached terminal status = 'failed' after TorrServer add/verification. Do not act on retry_wait, while retries remain, or on permanent preparation errors that happened before the TorrServer add.
+- Preserve the TorrServer attempt/backoff policy. The blocklist action must not mark an unverified torrent as a successful TorrServer import.
+- Track the blocklist state in the existing SQLite database. Add schema columns in place; never reset the shared state database.
+- On first migration, mark failures already present before the feature as legacy_skipped, avoiding an unexpected mass of retrospective Radarr actions on upgrade. New terminal failures remain eligible automatically. Explicit --retry-failed resets the blocklist state for a deliberately re-armed attempt.
+- Persist request_started before the external side effect. If the HTTP result is ambiguous, verify read-only on later runs and do not blindly repeat the failed-history POST, which may create duplicate blocklist entries or trigger duplicate failed-download handling.
+- After an ambiguous request, check GET /api/v3/blocklist/movie?movieId=.... Radarr's public blocklist resource does not expose the torrent infohash, so this recovery path can only match the source release title and must report the limitation; it is not an exact-hash proof. After three successful checks without evidence, record a terminal blocklist failure.
 
 **Apprise notifications and logging**
 
-- Enrich the existing aggregated terminal-failure Apprise notification; do not create a separate notification just to report the blocklist result.
-- When blocking succeeds, append a clear statement to the affected item's normal failure summary that the release was added to the Radarr blocklist. If Radarr confirms it was already blocklisted, report that accurate outcome without implying a new entry was created.
-- If blocking is enabled but fails, append that the release could not be blocklisted, with a short sanitized reason. Never claim success before Radarr confirms it.
-- When the feature is disabled, do not mention a blocklist action in the user-facing message.
-- Add clear log events for the attempted action and its outcome (for example: blocked, already present, skipped/disabled, or failed). Include the Radarr instance and human-readable movie/release context where available, plus a sanitized reason on failure. Never log API keys or credential-bearing URLs.
-- Keep the existing notification severity, aggregation and deduplication rules for the terminal TorrServer failure. Apprise delivery errors remain non-fatal and must not cause recursive notifications.
+- Append the blocklist outcome to the existing grouped terminal-failure Apprise message; do not send a separate blocklist-only message.
+- Report confirmed native-action success, a source-title match found during recovery, unresolved/ambiguous state, or a definitive failure with a short sanitized reason. Do not mention blocklisting when the setting is disabled, for Sonarr, or for preparation failures.
+- Log meaningful outcomes with the Radarr instance, movie/release context and relevant history/media IDs. Use sanitized causes and never log API credentials.
+- Preserve existing terminal notification severity, aggregation and deduplication. Apprise delivery errors remain non-fatal.
 
-**Implementation and test checklist**
+**Implementation checklist**
 
-- [ ] Inspect current blocklist-related code and verify the supported Radarr API workflow for the installed Radarr version.
-- [ ] Add an opt-in per-instance configuration flag, disabled by default, with validation and documentation.
-- [ ] Block only the exact Radarr release, and only after its configured TorrServer add attempts are exhausted.
-- [ ] Ensure interim retries, Sonarr items, and pre-add preparation failures do not trigger this behavior.
-- [ ] Make repeat execution safe and avoid repeating the same terminal action on every timer run; handle an already-blocklisted release explicitly.
-- [ ] Extend the existing aggregated terminal Apprise message with the actual blocklist outcome (success, already present, or failure with sanitized reason); do not send a separate blocklist-only alert.
-- [ ] Add structured outcome logs with useful media/release context and secret redaction.
-- [ ] Add tests for disabled-by-default behavior, the terminal-attempt boundary, Radarr-only scope, already-blocklisted behavior, API failures, notification wording/aggregation and repeat-run deduplication.
-- [ ] Validate the live Radarr behavior with a deliberately selected test case before enabling the setting in production.
+- [x] Inspect Radarr's supported blocklist and history/failed APIs; use the native failed-history route rather than an unsupported endpoint.
+- [x] Add a default-enabled per-instance setting and explicit true values in Radarr example configs; preserve an opt-out.
+- [x] Restrict execution to terminal TorrServer add/verification failures in Radarr; keep retries, Sonarr, and pre-add preparation errors out.
+- [x] Add in-place state migration and per-item action/verification status; mark pre-upgrade failed rows as legacy_skipped.
+- [x] Add blocklist outcome to the existing terminal Apprise message and structured result logs, including a skipped log when disabled.
+- [x] Add tests for default-enabled TOML, native endpoint behavior, Radarr-only scope, ambiguous-result recovery, permanent API errors, state migration, and notification wording.
+- [ ] Confirm Python 3.11 and 3.12 GitHub Actions checks pass for the proposed revision.
+- [ ] Validate a deliberately selected failed Grab in a controlled live Radarr environment before deployment.
 
 ## Explicitly not planned
 
