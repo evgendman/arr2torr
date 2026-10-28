@@ -1,3 +1,12 @@
+## torr-arr-importer v1.3.2
+
+- Enable Radarr blocklisting by default (opt-out with radarr_blocklist_enabled = false) only after an add/verification attempt has reached terminal failure after the configured retry limit.
+- Use Radarr's supported POST /api/v3/history/failed/{historyId} endpoint so Radarr's native failure pipeline records the Grabbed release in its blocklist; do not call a nonexistent blocklist-creation endpoint.
+- Keep Sonarr behavior and pre-add preparation failures unchanged. Preserve bounded TorrServer retries and do not issue duplicate failed-history requests after an ambiguous response.
+- Add in-place SQLite state migration, explicitly skip pre-upgrade terminal failures to avoid retroactive mass blocklisting, and reset the state when --retry-failed re-arms an item.
+- Append the blocklist outcome to the existing grouped terminal Apprise failure message and add structured logs without introducing a separate notification.
+- Add tests for enabled-by-default configuration, terminal-state triggers, Radarr-only scope, API errors, recovery checks, migration safeguards and message wording.
+
 ## torr-arr-importer v1.3.1
 
 - Fix a startup race when Radarr and Sonarr initialize the shared SQLite database concurrently. Schema migrations now acquire a write reservation before inspecting and altering table schemas.
