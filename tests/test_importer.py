@@ -757,7 +757,7 @@ class SeerrWatchlistTests(unittest.TestCase):
 
 class RadarrBlocklistTests(unittest.TestCase):
     def make_failed(self, root, *, arr_type="radarr", name="radarr-1080"):
-        cfg = make_config(root)
+        cfg = importer.replace(make_config(root), max_add_attempts=1).normalized()
         if arr_type == "sonarr":
             cfg = importer.replace(
                 cfg, name=name, arr_type="sonarr", category="tv",
@@ -771,7 +771,10 @@ class RadarrBlocklistTests(unittest.TestCase):
         }
         db.begin_pending(grab, cfg.name, media, cfg.verification_timeout_sec)
         self.assertEqual(
-            db.fail_pending(HASH1, "TorrServer metadata timeout", 1, 1),
+            db.fail_pending(
+                HASH1, "TorrServer metadata timeout",
+                cfg.max_add_attempts, cfg.retry_backoff_sec,
+            ),
             "failed",
         )
         return cfg, db
@@ -872,6 +875,28 @@ state_db = "{Path(tmp) / 'state.db'}"
                 self.assertEqual(row["radarr_blocklist_status"], "failed")
                 self.assertEqual(row["radarr_blocklist_verify_misses"], 3)
                 self.assertIn("was ambiguous", row["radarr_blocklist_last_error"])
+            finally:
+                db.close()
+
+    def test_terminal_error_before_configured_attempt_limit_is_not_blocklisted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            db = importer.StateDB(cfg.state_db)
+            grab = make_grab(HASH1, 74, "Transiently.Unavailable.Release")
+            db.begin_pending(grab, cfg.name, {"title": "Test Movie"}, cfg.verification_timeout_sec)
+            self.assertEqual(
+                db.fail_pending(
+                    HASH1, "permanent TorrServer HTTP 400", cfg.max_add_attempts,
+                    cfg.retry_backoff_sec, permanent=True,
+                ),
+                "failed",
+            )
+            arr, calls = self.fake_arr([])
+            try:
+                self.assertEqual(db.pending_rows(cfg.name)[0]["attempt_count"], 1)
+                importer.process_radarr_blocklist(cfg, arr, db)
+                self.assertEqual(calls, [])
+                self.assertIsNone(db.pending_rows(cfg.name)[0]["radarr_blocklist_status"])
             finally:
                 db.close()
 
