@@ -1,5 +1,12 @@
 # Changelog
 
+## torr-arr-importer v1.3.3 (state-reconciliation candidate)
+
+- Treat exact infohash membership in TorrServer's list as successful addition; remove the readiness-metadata requirement while retaining the requirement for a post-add list observation.
+- Remove stale pending_adds rows when the same hash is already in the successful imports history, without re-adding a hash that is absent from TorrServer after a deliberate removal.
+- Re-arm an exhausted failed row only when Radarr presents a strictly newer Grab history ID for the same hash; reset attempt, notification, Seerr and blocklist state for that new Grab.
+- Add regression tests for list-presence confirmation, stale pending cleanup, and re-grabbing a terminally failed hash.
+
 ## torr-arr-importer v1.3.2 (combined candidate)
 
 ### Radarr terminal-failure blocklisting

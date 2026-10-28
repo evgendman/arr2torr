@@ -4,7 +4,7 @@
 
 arr2torr is the project and documentation home for **torr-arr-importer**, a polling service that transfers releases selected with **Grab** in Radarr or Sonarr directly to the TorrServer API. It is intended for a media workflow where the user wants to start streaming from TorrServer, then expose those streams to a media library through STRM files or another integration.
 
-The current implementation described here is **torr-arr-importer v1.3.2**.
+The current implementation described here is **torr-arr-importer v1.3.3**.
 
 ## Why this exists
 
@@ -60,7 +60,7 @@ With the usual five-minute timer, a successfully grabbed release is normally tra
 - Resolves the Arr history data.downloadUrl. In the tested Prowlarr setup, this URL redirects to the original magnet link.
 - Adds the torrent through TorrServer's /torrents API, including the Arr title, media category and a safe subset of Arr metadata in data.
 - Uses one shared SQLite database across all importer instances for verified imports and restart-safe pending attempts.
-- Treats the TorrServer add response as an acknowledgement, then checks observable readiness or explicit database-presence evidence before recording success.
+- Treats the initial TorrServer add response as an acknowledgement; success is recorded when the exact infohash appears in TorrServer's action=list response.
 - Submits candidates first and verifies the batch with one polling loop and per-hash deadlines rather than serially waiting for each add.
 - Retries unverified attempts with bounded exponential backoff and avoids resending hashes that are still pending on TorrServer.
 - Supports non-mutating --dry-run, deliberate --rebuild, and explicit --retry-failed for exhausted unverified attempts.
@@ -76,7 +76,7 @@ The importer persists a pending attempt before the add request, submits eligible
 
 Pending attempts live in the shared SQLite table pending_adds and do not contain the credential-bearing download URL. After a process restart, they are reconciled against TorrServer before retrying. Failures use bounded exponential backoff and stop automatically after the configured attempt limit; --retry-failed explicitly re-queues exhausted, never-confirmed attempts for the selected Arr instance.
 
-Verification means observable readiness or database presence; it does not claim a durable disk-commit guarantee that TorrServer's API does not expose. Older successful-import records remain protected from automatic resurrection. Use --rebuild only when intentionally repopulating missing historical entries.
+Verification means the exact infohash appears in TorrServer's action=list response. This confirms list membership, not media-file readiness, streamability or a durable disk commit. Older successful-import records remain protected from automatic resurrection. Use --rebuild only when intentionally repopulating missing historical entries.
 
 Default verification settings are verification_timeout_sec = 120, verification_poll_interval_sec = 3.0, retry_backoff_sec = 60 (doubling per failed attempt, capped at one hour), and max_add_attempts = 3. Compare the timeout with the TorrentDisconnectTimeout setting of the installed TorrServer build.
 
@@ -199,7 +199,7 @@ The current stored data subset includes source instance name, media type, target
 - [Roadmap and validation status](ROADMAP.md)
 - [Version history](CHANGELOG.md)
 
-The current code package is **torr-arr-importer v1.3.2**. It uses Python 3.11+ and the standard library; it does not require external Python packages.
+The current code package is **torr-arr-importer v1.3.3**. It uses Python 3.11+ and the standard library; it does not require external Python packages.
 
 ## Related project: STRM/NFO library generation
 
@@ -207,7 +207,7 @@ The current code package is **torr-arr-importer v1.3.2**. It uses Python 3.11+ a
 
 ## Current status
 
-The installed MINI-Ubuntu file currently reports version 1.3.2 and exactly matches the feat/terminal-only-notifications branch. It includes the terminal-only notification redesign and durable Apprise-delivery retries, but does not include Radarr blocklisting.
+MINI-Ubuntu currently has the combined v1.3.2 candidate installed, including Radarr blocklisting and terminal-only notification retries. The v1.3.3 candidate adds list-membership success semantics, stale-pending cleanup, and re-arming after a newer Radarr Grab; it still requires regression tests and controlled live validation.
 
 PR #4 adds default-enabled Radarr blocklisting only after the configured TorrServer add/verification attempt limit is exhausted. A source comparison found that the original PR branch did not include the notification changes present in the installed file. The combined candidate is being reconciled and must pass a fresh full test run and CI before installation.
 

@@ -28,7 +28,7 @@ from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 
-VERSION = "1.3.2"
+VERSION = "1.3.3"
 DEFAULT_PAGE_SIZE = 1000
 DEFAULT_TIMEOUT = 30
 
@@ -85,7 +85,7 @@ class Config:
     state_db: str
     history_page_size: int = DEFAULT_PAGE_SIZE
     timeout: int = DEFAULT_TIMEOUT
-    user_agent: str = "torr-arr-importer/1.3.2"
+    user_agent: str = "torr-arr-importer/1.3.3"
     log_level: str = "INFO"
     log_file: str = ""
     retry_count: int = 2
@@ -721,6 +721,41 @@ class StateDB:
             )
             self.conn.execute("DELETE FROM pending_adds WHERE hash = ?", (torrent_hash,))
         return value
+
+    def rearm_failed_for_new_grab(
+        self, grab: Grab, source: str, verification_timeout_sec: int,
+    ) -> bool:
+        """Re-arm a terminal failure only for a newer Radarr Grab of the same hash."""
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat()
+        deadline_text = (now + timedelta(seconds=verification_timeout_sec)).isoformat()
+        download_id = str(grab.data.get("downloadId") or grab.download_id or "") or None
+        with self.conn:
+            cur = self.conn.execute(
+                """
+                UPDATE pending_adds
+                SET arr_history_id = ?, arr_media_id = ?, download_id = ?, title = ?,
+                    requested_at = ?, deadline_at = ?, attempt_count = 0,
+                    status = 'retry_wait', last_checked_at = NULL,
+                    last_status = 'new-radarr-grab', last_error = NULL,
+                    next_retry_at = ?,
+                    notification_attempted_at = NULL, notification_attempt_count = 0,
+                    notification_next_retry_at = NULL, notification_last_error = NULL,
+                    seerr_watchlist_status = NULL, seerr_watchlist_last_error = NULL,
+                    seerr_watchlist_error_fingerprint = NULL,
+                    seerr_watchlist_error_notified_fingerprint = NULL,
+                    seerr_watchlist_warning_notified_at = NULL,
+                    radarr_blocklist_status = NULL, radarr_blocklist_last_error = NULL,
+                    radarr_blocklist_verify_misses = 0
+                WHERE hash = ? AND source = ? AND status = 'failed'
+                  AND COALESCE(arr_history_id, 0) < ?
+                """,
+                (
+                    grab.history_id, grab.arr_media_id, download_id, grab.source_title,
+                    now_text, deadline_text, now_text, grab.hash, source, grab.history_id,
+                ),
+            )
+        return cur.rowcount == 1
 
     def requeue_failed(self, source: str) -> int:
         """Explicitly re-arm exhausted, never-confirmed attempts for operator-directed retry."""
@@ -1725,25 +1760,9 @@ def parse_iso_datetime(value: Any) -> datetime | None:
 
 
 def verification_evidence(record: dict[str, Any] | None) -> str | None:
-    """Return observable evidence that an exact hash is ready or persisted."""
-    if not isinstance(record, dict):
-        return None
-
-    status_text = str(record.get("stat_string") or record.get("statString") or "").strip().lower()
-    status_num = as_int(record.get("stat"))
-    file_stats = record.get("file_stats") or record.get("FileStats") or record.get("files")
-    if isinstance(file_stats, list):
-        for item in file_stats:
-            if not isinstance(item, dict):
-                continue
-            path = str(item.get("path") or item.get("Path") or "").strip()
-            file_id = as_int(item.get("id", item.get("Id")))
-            if path and file_id is not None and file_id > 0:
-                return "file-stats"
-    if status_num == 3 or "torrent working" in status_text:
-        return "working-status"
-    if status_num == 5 or "torrent in db" in status_text:
-        return "database-presence"
+    """Return success when the exact hash has appeared in TorrServer's list."""
+    if isinstance(record, dict):
+        return "torrserver-list-presence"
     return None
 
 
@@ -1881,15 +1900,25 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
             requeued = db.requeue_failed(cfg.name)
             logging.warning("RETRY_FAILED source=%s requeued=%d", cfg.name, requeued)
 
-        # Reconcile every unverified attempt against the current list before candidate
-        # selection. If a previously failed hash is present but not ready, resume
-        # observation instead of adding its magnet again.
+        # Reconcile persisted state against successful-import history and TorrServer membership.
+        # Membership in TorrServer's list is the agreed success criterion; metadata readiness
+        # is not required. Remove stale pending rows for hashes already recorded as imported.
+        grabs_by_hash = {grab.hash.lower(): grab for grab in grabs if grab.hash}
         if not dry_run:
             for pending in db.pending_rows(source=cfg.name):
                 status = str(pending.get("status") or "")
                 if status not in {"pending", "retry_wait", "failed"}:
                     continue
                 h = str(pending.get("hash") or "").lower()
+
+                if h in imported_hashes:
+                    db.confirm_pending(h)
+                    logging.info(
+                        "PENDING_CLEARED source=%s hash=%s reason=already-in-import-history",
+                        cfg.name, h,
+                    )
+                    continue
+
                 record = ts_by_hash.get(h)
                 evidence = verification_evidence(record)
                 if evidence:
@@ -1903,14 +1932,26 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                         )
                     continue
 
-                if h in ts_hashes and status in {"retry_wait", "failed"}:
-                    observed = str(record.get("stat_string") or record.get("statString") or "present-not-ready")
-                    db.resume_verification(h, cfg.verification_timeout_sec, observed)
-                    logging.info(
-                        "VERIFY_RESUMED source=%s hash=%s stat=%s reason=present-without-readiness",
-                        cfg.name, h, observed,
-                    )
-                    continue
+                # A later Radarr Grab of the same infohash represents a new operator-selected
+                # attempt. Do not let a terminal row from the older Grab block it forever.
+                if status == "failed":
+                    current_grab = grabs_by_hash.get(h)
+                    old_history_id = as_int(pending.get("arr_history_id")) or 0
+                    new_history_id = as_int(current_grab.history_id) if current_grab else None
+                    if (
+                        current_grab is not None
+                        and old_history_id > 0
+                        and new_history_id is not None
+                        and new_history_id > old_history_id
+                        and db.rearm_failed_for_new_grab(
+                            current_grab, cfg.name, cfg.verification_timeout_sec,
+                        )
+                    ):
+                        logging.warning(
+                            "REARMED_NEW_GRAB source=%s hash=%s previous_history_id=%d current_history_id=%d reason=new-radarr-grab",
+                            cfg.name, h, old_history_id, new_history_id,
+                        )
+                        continue
 
                 if status == "pending":
                     deadline = pending_deadline(pending)
@@ -2196,7 +2237,7 @@ def config_from_file(path: str) -> Config:
         state_db=str(raw.get("state_db", "/var/lib/torr-arr-importer/state.db")),
         history_page_size=int(raw.get("history_page_size", DEFAULT_PAGE_SIZE)),
         timeout=int(raw.get("timeout", DEFAULT_TIMEOUT)),
-        user_agent=str(raw.get("user_agent", "torr-arr-importer/1.3.2")),
+        user_agent=str(raw.get("user_agent", "torr-arr-importer/1.3.3")),
         log_level=str(raw.get("log_level", "INFO")).upper(),
         log_file=str(raw.get("log_file", "")),
         retry_count=int(raw.get("retry_count", 2)),

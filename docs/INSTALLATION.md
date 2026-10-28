@@ -1,6 +1,6 @@
 # Installation and configuration
 
-The instructions below describe the v1.3.2 systemd deployment, default-enabled Radarr terminal-failure blocklisting, and optional Seerr Watchlist integration. The four-instance examples are intended to be adapted to the actual addresses, ports and API keys in your installation.
+The instructions below describe the v1.3.3 in-place update, including Radarr terminal-failure blocklisting, list-membership confirmation and stale-state reconciliation, plus optional Seerr Watchlist integration. The four-instance examples are intended to be adapted to the actual addresses, ports and API keys in your installation.
 
 ## Requirements
 
@@ -27,24 +27,23 @@ The installer does not enable timers automatically. Configure and test an instan
 > API keys belong only in local files under /etc/torr-arr-importer/. Never commit a populated config to Git.
 
 
-## Upgrade from v1.3.1 to v1.3.2 in place
+## Upgrade from v1.3.2 to v1.3.3 in place
 
-**Important:** review the proposed release and complete a deliberate, controlled live Radarr validation before deploying it to production. v1.3.2 enables Radarr's native failed-download/blocklist handling by default, after the configured `max_add_attempts` count is reached. A permanent API rejection before that attempt count is reached is not blocklisted. Sonarr behavior is unchanged.
+**Important:** review the proposed release and complete a deliberate, controlled live Radarr validation before deploying it to production. v1.3.3 preserves Radarr's native failed-download/blocklist handling by default, after the configured `max_add_attempts` count is reached. A permanent API rejection before that attempt count is reached is not blocklisted. Sonarr behavior is unchanged.
 
-The upgrade adds three columns to the existing `pending_adds` table in-place. It does not clear or rebuild import history. During the first migration, rows already marked `failed` are marked `legacy_skipped`, so old failures are not retroactively sent to Radarr. **Do not delete `/var/lib/torr-arr-importer/state.db`.**
+The v1.3.2 schema migration remains in place; v1.3.3 does not reset the database or add new schema fields. On the next normal importer run, it removes stale pending rows whose hashes already exist in successful import history, and re-arms a terminal-failed row only when the current Radarr history has a strictly newer Grab ID for that same hash. It does not rebuild import history. **Do not delete `/var/lib/torr-arr-importer/state.db`.**
 
 1. Prepare the exact tested candidate in a temporary directory and run the checks:
 
        set -euo pipefail
-       SRC="$(mktemp -d /tmp/arr2torr-v1.3.2.XXXXXX)"
+       SRC="$(mktemp -d /tmp/arr2torr-v1.3.3.XXXXXX)"
        git clone --branch feature/radarr-blocklist-v1.3.2 https://github.com/evgendman/arr2torr.git "$SRC"
-       git -C "$SRC" checkout d1ddda5c9fb601fa5c06717aa89e5732632be319
        python3 -m py_compile "$SRC/src/importer.py"
        (cd "$SRC" && python3 -m unittest discover -s tests -v)
        python3 "$SRC/src/importer.py" --version
-       printf '%s\n' "$SRC" > /tmp/arr2torr-v1.3.2-source-path
+       printf '%s\n' "$SRC" > /tmp/arr2torr-v1.3.3-source-path
 
-   The expected version output is `1.3.2`; CI has passed 40 tests on Python 3.11 and 40 on Python 3.12. Use this path only after the candidate has been approved for live validation/deployment.
+   The expected version output is `1.3.3`; confirm the current CI run is green on Python 3.11 and 3.12 before deployment. Use this path only after the candidate has been approved for live validation/deployment.
 
 2. Stop only the two 1080p timers previously observed active on MINI-Ubuntu, then wait for their oneshot services to finish. Do not enable either 4K timer:
 

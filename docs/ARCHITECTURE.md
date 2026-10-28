@@ -1,6 +1,6 @@
 # Architecture and state model
 
-This document describes the proposed combined torr-arr-importer v1.3.2 behavior and data mapping. It preserves the terminal-only notification and durable Apprise-delivery behavior present in the installed code, and adds default-enabled Radarr blocklisting after the configured TorrServer add/verification attempt limit is exhausted. The combined candidate is not yet deployed or live-validated for Radarr blocklisting.
+This document describes the proposed combined torr-arr-importer v1.3.3 behavior and data mapping. It preserves the terminal-only notification and durable Apprise-delivery behavior present in the installed code, and adds default-enabled Radarr blocklisting after the configured TorrServer add/verification attempt limit is exhausted. The combined candidate is not yet deployed or live-validated for Radarr blocklisting.
 
 ## 1. Source of truth
 

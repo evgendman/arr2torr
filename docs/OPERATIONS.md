@@ -9,7 +9,7 @@ A normal cycle logs a concise summary of each stage:
 3. A TorrServer list snapshot is read.
 4. SNAPSHOT — number of distinct Arr grabs, hashes currently on TorrServer, hashes already known to the shared import history and new candidates.
 5. For each candidate, Arr media/series details are fetched as needed, then an add is sent to TorrServer.
-6. ADD_ACCEPTED logs TorrServer's initial acknowledgement; ADDED is logged only after readiness or database-presence evidence confirms the hash.
+6. ADD_ACCEPTED logs TorrServer's initial acknowledgement; ADDED is logged only after the exact hash appears in TorrServer's action=list response.
 7. DONE records candidates, added/failed counts, hashes skipped as already present, hashes skipped as previously imported, elapsed time and dry-run mode where applicable.
 
 Example commands:
@@ -112,7 +112,7 @@ Use the HISTORY and SNAPSHOT log lines first.
 
 ## Asynchronous add verification (v1.1.0)
 
-An ADD_ACCEPTED log entry means TorrServer acknowledged the add request; it is not a completed import. ADDED is logged only after the importer observes readiness or explicit database-presence evidence for the exact hash.
+An ADD_ACCEPTED log entry means TorrServer acknowledged the add request; it is not a completed import. ADDED is logged after a later TorrServer action=list response contains the exact hash. List membership confirms presence only; it does not guarantee streamability.
 
 The importer submits eligible candidates first, then polls one shared TorrServer action=list snapshot at a configurable interval. Each attempt has its own deadline measured from the add request. Defaults are a 120-second verification deadline and a 3-second polling interval. Compare the deadline with TorrentDisconnectTimeout in the installed TorrServer build.
 
@@ -128,7 +128,7 @@ To explicitly re-queue exhausted unverified attempts for one source instance, ru
 
 Do not combine --retry-failed with --dry-run. This option re-queues only failed unverified attempts for the selected instance; it does not clear successful import history or automatically restore confirmed user-removed torrents. Use --rebuild only for intentional historical repopulation.
 
-Verification means observable readiness (usable FileStats or working status) or explicit TorrServer database presence. It does not claim a durable disk-commit acknowledgement that TorrServer does not expose.
+Verification means the exact hash appears in TorrServer's action=list response. It does not guarantee that media metadata is ready, that playback will work, or that TorrServer has acknowledged a durable disk commit.
 
 ## API and authentication errors
 
