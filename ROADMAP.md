@@ -13,7 +13,8 @@ The previously documented v1.2 notification behavior (numeric retry warnings plu
 - [x] Keep different terminal errors separate when their TMDb IDs are missing.
 - [x] Mark a terminal notification delivered only after Apprise responds with HTTP 2xx. Store retry count/time/error in the existing SQLite DB, retry delivery with a persistent backoff capped at one hour, and do not alter transfer state.
 - [x] Add regression coverage for quiet retry states, one final message with Seerr status, distinct no-TMDb records, and delivery recovery after an Apprise failure.
-- [ ] Review CI on Python 3.11/3.12 and merge the change.
+- [x] GitHub Actions passed on Python 3.11 and 3.12; both jobs compiled the importer and passed the test suite.
+- [ ] Review and merge PR #3 after review.
 - [ ] Deploy a reviewed release to MINI-Ubuntu and inspect an actual Telegram message before treating the wording as live-accepted.
 
 Delivery is at-least-once: after an ambiguous timeout Apprise may already have accepted a message, and a retry can rarely duplicate it. No exactly-once guarantee is claimed. The application version on MINI-Ubuntu remains v1.3.1 until the new release is deliberately installed.
