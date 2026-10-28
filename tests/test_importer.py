@@ -904,6 +904,10 @@ state_db = "{Path(tmp) / 'state.db'}"
                     "configured attempt limit has not been exhausted",
                     db.pending_rows(cfg.name)[0]["radarr_blocklist_last_error"],
                 )
+                self.assertIn(
+                    "условие исчерпания попыток не выполнено",
+                    importer.terminal_notification_block(cfg, db.pending_rows(cfg.name)[0]),
+                )
             finally:
                 db.close()
 
