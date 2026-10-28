@@ -1,9 +1,20 @@
+# Changelog
+
+## Unreleased — terminal-only notifications and durable delivery
+
+- Stop sending user-facing messages for retry-wait states. Users are notified only when add/verification reaches terminal failure or a permanent preparation error prevents the add.
+- Send one aggregated critical/failure message containing the media and selected-release titles, a plain-language cause, attempts used or permanent-failure context, a recommendation to choose another release in Radarr/Sonarr, the Arr card link when available, and the current Seerr Watchlist result.
+- Remove separate retry-warning and Seerr Watchlist notifications so one transfer failure is not announced through multiple topics.
+- Translate common causes (verification deadline, expired HTTP 410 link, authorization and network failures) into concise Russian text while retaining technical detail in local logs.
+- Persist notification delivery attempts, last error and next retry time in the existing SQLite state DB. Mark terminal items notified only after an Apprise 2xx response; retry failed deliveries with a persisted backoff capped at one hour.
+- Keep delivery attempts independent from TorrServer add attempts and import status. Network/notification failures do not change transfer success/failure semantics.
+- Keep distinct terminal-error rows separate when TMDb IDs are missing; add regressions for this grouping edge case, one-message Seerr status, silent retry states and retry after Apprise failure.
+- No transfer policy, add-attempt limit, source selection, manifest or media payload behavior changes. SQLite changes are additive and migrate in place; installed deployment remains on v1.3.1 until a reviewed release is deployed.
+
 ## torr-arr-importer v1.3.1
 
 - Fix a startup race when Radarr and Sonarr initialize the shared SQLite database concurrently. Schema migrations now acquire a write reservation before inspecting and altering table schemas.
 - Add a concurrent-initializer regression test for in-place migration of an existing v1.2 database. No state database reset or data deletion is required.
-
-# Changelog
 
 ## torr-arr-importer v1.3.0
 

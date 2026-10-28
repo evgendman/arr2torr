@@ -540,8 +540,9 @@ class SeerrWatchlistTests(unittest.TestCase):
                 for row in db.conn.execute("PRAGMA table_info(terminal_events)").fetchall()
             }
             for column in (
-                "tmdb_id", "tvdb_id", "seerr_watchlist_status",
-                "seerr_watchlist_error_fingerprint",
+                "tmdb_id", "tvdb_id", "notification_attempt_count",
+                "notification_next_retry_at", "notification_last_error",
+                "seerr_watchlist_status", "seerr_watchlist_error_fingerprint",
                 "seerr_watchlist_error_notified_fingerprint",
                 "seerr_watchlist_warning_notified_at",
             ):
@@ -553,7 +554,7 @@ class SeerrWatchlistTests(unittest.TestCase):
             self.assertEqual(legacy["reason"], "old failure")
             db.close()
 
-    def test_movie_post_adds_once_and_sends_warning_to_warnings_tag(self):
+    def test_movie_post_adds_once_without_a_separate_notification(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self.make_seerr_config(Path(tmp))
             db = importer.StateDB(cfg.state_db)
@@ -576,14 +577,10 @@ class SeerrWatchlistTests(unittest.TestCase):
             self.assertEqual(posts[0]["payload"], {"tmdbId": 12345, "mediaType": "movie"})
             self.assertTrue(posts[0]["api_key_header"])
             self.assertEqual(posts[0]["api_key"], "test-seerr-key")
-            self.assertEqual(len(sent), 1)
-            self.assertEqual(sent[0]["type"], "warning")
-            self.assertEqual(sent[0]["tag"], "warnings")
-            self.assertIn("не означает, что медиа уже доступно", sent[0]["body"])
-            self.assertIn("The Example Movie", sent[0]["body"])
+            self.assertEqual(sent, [])
             row = db.pending_rows(cfg.name)[0]
             self.assertEqual(row["seerr_watchlist_status"], "added")
-            self.assertIsNotNone(row["seerr_watchlist_warning_notified_at"])
+            self.assertIsNone(row["seerr_watchlist_warning_notified_at"])
             db.close()
 
     def test_series_post_requests_the_whole_series_at_title_level(self):
@@ -610,8 +607,7 @@ class SeerrWatchlistTests(unittest.TestCase):
             self.assertEqual(post["payload"], {"tmdbId": 9876, "mediaType": "tv"})
             self.assertNotIn("seasons", post["payload"])
             self.assertNotIn("episodes", post["payload"])
-            self.assertEqual(sent[0][3], "warning")
-            self.assertEqual(sent[0][4], "warnings")
+            self.assertEqual(sent, [])
             db.close()
 
     def test_duplicate_409_is_accepted_only_after_local_watchlist_verification(self):
@@ -642,8 +638,7 @@ class SeerrWatchlistTests(unittest.TestCase):
             self.assertIn("/api/v1/user/1/watchlist?page=1", calls[1]["url"])
             row = db.pending_rows(cfg.name)[0]
             self.assertEqual(row["seerr_watchlist_status"], "already_present")
-            self.assertEqual(len(sent), 1)
-            self.assertEqual(sent[0]["type"], "warning")
+            self.assertEqual(sent, [])
             db.close()
 
     def test_409_without_local_requester_confirmation_is_a_critical_error(self):
@@ -674,9 +669,7 @@ class SeerrWatchlistTests(unittest.TestCase):
                 importer.process_seerr_watchlist(cfg, db)
             row = db.pending_rows(cfg.name)[0]
             self.assertEqual(row["seerr_watchlist_status"], "error")
-            errors = [item for item in sent if item["tag"] == "critical" and item["type"] == "failure"]
-            self.assertEqual(len(errors), 1)  # unchanged error is not notified every timer run
-            self.assertIn("not found", errors[0]["body"])
+            self.assertEqual(sent, [])
             self.assertNotIn("test-seerr-key", repr(sent))
             db.close()
 
@@ -695,10 +688,7 @@ class SeerrWatchlistTests(unittest.TestCase):
             ):
                 importer.process_seerr_watchlist(cfg, db)
                 importer.process_seerr_watchlist(cfg, db)
-            self.assertEqual(len(sent), 1)
-            self.assertEqual(sent[0]["tag"], "critical")
-            self.assertEqual(sent[0]["type"], "failure")
-            self.assertIn("TMDb ID is missing", sent[0]["body"])
+            self.assertEqual(sent, [])
             self.assertEqual(db.pending_rows(cfg.name)[0]["seerr_watchlist_status"], "missing_tmdb_id")
             db.close()
 
@@ -730,7 +720,7 @@ class SeerrWatchlistTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(row["tmdb_id"], "4567")
             self.assertEqual(row["seerr_watchlist_status"], "added")
-            self.assertEqual(sent[0]["tag"], "warnings")
+            self.assertEqual(sent, [])
             db.close()
 
     def test_only_final_failures_for_current_arr_instance_are_selected(self):
@@ -783,34 +773,23 @@ class NotificationTests(unittest.TestCase):
             return response
         return send
 
-    def test_retry_warning_is_numeric_aggregated_and_deduplicated(self):
+    def test_retry_wait_items_do_not_send_notifications(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             cfg = self.make_notification_config(root)
             db = importer.StateDB(cfg.state_db)
-            one = make_grab(HASH1, 1, "Private.Release.Name.1080p")
-            two = make_grab(HASH2, 2, "Another.Private.Release.Name.1080p")
-            for grab in (one, two):
+            for grab in (
+                make_grab(HASH1, 1, "Private.Release.Name.1080p"),
+                make_grab(HASH2, 2, "Another.Private.Release.Name.1080p"),
+            ):
                 db.begin_pending(grab, cfg.name, {"title": "Secret Film Title"}, 120)
                 self.assertEqual(db.fail_pending(grab.hash, "metadata timeout", 3, 1), "retry_wait")
 
-            sent = []
-            with mock.patch.object(importer, "urlopen", side_effect=self.fake_apprise(sent)):
+            with mock.patch.object(importer, "urlopen") as send:
                 importer.dispatch_notifications(cfg, db)
-                self.assertEqual(len(sent), 1)
                 importer.dispatch_notifications(cfg, db)
-                self.assertEqual(len(sent), 1)
-
-            payload = sent[0]["payload"]
-            self.assertEqual(sent[0]["url"], "http://192.168.0.14:8000/notify/arr-stack")
-            self.assertEqual(sent[0]["timeout"], 5)
-            self.assertEqual(payload["tag"], "warnings")
-            self.assertEqual(payload["type"], "warning")
-            self.assertIn("2 проблемных раздач", payload["body"])
-            self.assertNotIn("Secret Film Title", payload["body"])
-            self.assertNotIn("Private.Release.Name", payload["body"])
-            self.assertNotIn(HASH1, payload["body"])
-            self.assertNotIn(HASH2, payload["body"])
+                send.assert_not_called()
+            self.assertEqual(len(db.unnotified_terminal_failures(cfg.name)), 0)
             db.close()
 
     def test_terminal_failure_includes_title_release_and_arr_card_once(self):
@@ -823,8 +802,13 @@ class NotificationTests(unittest.TestCase):
                 {"title": "All Good Things", "titleSlug": "all-good-things-2010-603"},
                 120,
             )
+            db.conn.execute(
+                "UPDATE pending_adds SET attempt_count = ? WHERE hash = ?",
+                (cfg.max_add_attempts, HASH1),
+            )
+            db.conn.commit()
             self.assertEqual(
-                db.fail_pending(HASH1, "verification deadline expired; metadata timeout", 1, 1),
+                db.fail_pending(HASH1, "verification deadline expired; metadata timeout", cfg.max_add_attempts, 1),
                 "failed",
             )
             second = make_grab(HASH2, 2, "Inside.Out.2.2024.1080p.WEB-DL")
@@ -833,8 +817,13 @@ class NotificationTests(unittest.TestCase):
                 {"title": "Inside Out 2", "titleSlug": "inside-out-2-2024"},
                 120,
             )
+            db.conn.execute(
+                "UPDATE pending_adds SET attempt_count = ? WHERE hash = ?",
+                (cfg.max_add_attempts, HASH2),
+            )
+            db.conn.commit()
             self.assertEqual(
-                db.fail_pending(HASH2, "verification deadline expired; metadata timeout", 1, 1),
+                db.fail_pending(HASH2, "verification deadline expired; metadata timeout", cfg.max_add_attempts, 1),
                 "failed",
             )
             sent = []
@@ -847,7 +836,9 @@ class NotificationTests(unittest.TestCase):
             payload = sent[0]["payload"]
             self.assertEqual(payload["tag"], "critical")
             self.assertEqual(payload["type"], "failure")
-            self.assertIn("Терминальных ошибок в этой сводке: 2", payload["body"])
+            self.assertIn("Окончательные ошибки передачи в TorrServer: 2.", payload["body"])
+            self.assertIn("Автоматические попытки исчерпаны: 3 из 3.", payload["body"])
+            self.assertIn("Рекомендация: выберите другую раздачу в Radarr", payload["body"])
             self.assertIn("All Good Things", payload["body"])
             self.assertIn("All.Good.Things.2010.1080p.WEB-DL", payload["body"])
             self.assertIn("http://192.168.0.14:7878/movie/all-good-things-2010-603", payload["body"])
@@ -855,6 +846,81 @@ class NotificationTests(unittest.TestCase):
             self.assertNotIn(HASH1, payload["body"])
             self.assertNotIn(HASH2, payload["body"])
             self.assertEqual(len(db.unnotified_terminal_failures(cfg.name)), 0)
+            db.close()
+
+    def test_final_critical_message_includes_seerr_status_and_arr_card(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = importer.replace(
+                self.make_notification_config(root),
+                seerr_watchlist_enabled=True,
+                seerr_url="http://192.168.0.14:5055",
+                seerr_api_key="test-seerr-key",
+            ).normalized()
+            db = importer.StateDB(cfg.state_db)
+            grab = make_grab(HASH1, 1, "Example.Release.1080p.WEB-DL")
+            db.begin_pending(
+                grab, cfg.name,
+                {"title": "Example Film", "titleSlug": "example-film-2026"},
+                120,
+            )
+            db.conn.execute(
+                "UPDATE pending_adds SET attempt_count = ? WHERE hash = ?",
+                (cfg.max_add_attempts, HASH1),
+            )
+            db.conn.commit()
+            db.fail_pending(HASH1, "verification deadline expired; last observed status=absent-from-list",
+                            cfg.max_add_attempts, 1)
+            db.conn.execute(
+                "UPDATE pending_adds SET seerr_watchlist_status = 'added' WHERE hash = ?",
+                (HASH1,),
+            )
+            db.conn.commit()
+            sent = []
+            with mock.patch.object(importer, "urlopen", side_effect=self.fake_apprise(sent)):
+                importer.dispatch_notifications(cfg, db)
+            self.assertEqual(len(sent), 1)
+            payload = sent[0]["payload"]
+            self.assertEqual(payload["tag"], "critical")
+            self.assertEqual(payload["type"], "failure")
+            self.assertIn("не удалось передать выбранную раздачу в torrserver", payload["body"].lower())
+            self.assertIn("рекомендация: выберите другую раздачу в radarr", payload["body"].lower())
+            self.assertIn("добавлено в watchlist администратора seerr", payload["body"].lower())
+            self.assertIn("http://192.168.0.14:7878/movie/example-film-2026", payload["body"])
+            self.assertNotIn('"tag": "warnings"', repr(sent))
+            db.close()
+
+    def test_terminal_items_without_tmdb_ids_remain_separate_in_critical_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = importer.replace(
+                self.make_notification_config(root),
+                seerr_watchlist_enabled=True,
+                seerr_url="http://192.168.0.14:5055",
+                seerr_api_key="test-seerr-key",
+            ).normalized()
+            db = importer.StateDB(cfg.state_db)
+            for h, name in ((HASH1, "Unknown Movie Alpha"), (HASH2, "Unknown Movie Beta")):
+                db.record_terminal_event(
+                    event_key=f"{cfg.name}:{h}:prepare", source=cfg.name,
+                    arr_type="radarr", category="movie", arr_media_id=None,
+                    media_title=name, release_title=f"{name}.WEB-DL",
+                    title_slug=None, stage="prepare",
+                    reason="HTTP 410 resolving download URL", tmdb_id=None,
+                )
+            db.conn.execute(
+                "UPDATE terminal_events SET seerr_watchlist_status = 'missing_tmdb_id' WHERE source = ?",
+                (cfg.name,),
+            )
+            db.conn.commit()
+            sent = []
+            with mock.patch.object(importer, "urlopen", side_effect=self.fake_apprise(sent)):
+                importer.dispatch_notifications(cfg, db)
+            self.assertEqual(len(sent), 1)
+            body = sent[0]["payload"]["body"]
+            self.assertIn("Unknown Movie Alpha", body)
+            self.assertIn("Unknown Movie Beta", body)
+            self.assertEqual(body.count("Не удалось добавить медиа в Watchlist Seerr"), 2)
             db.close()
 
     def test_permanent_prepare_failure_is_aggregated_without_leaking_url(self):
@@ -881,14 +947,15 @@ class NotificationTests(unittest.TestCase):
             payload = sent[0]["payload"]
             self.assertEqual(payload["tag"], "critical")
             self.assertIn("The Prestige", payload["body"])
-            self.assertIn("HTTP 410 resolving download URL", payload["body"])
+            self.assertIn("ссылка на выбранную раздачу больше недоступна (HTTP 410)", payload["body"])
+            self.assertIn("запрос добавления в TorrServer не выполнялся", payload["body"])
             self.assertNotIn("indexer.invalid", payload["body"])
             self.assertNotIn("do-not-send", payload["body"])
             self.assertNotIn(HASH1, payload["body"])
             self.assertEqual(db.unnotified_terminal_events(cfg.name), [])
             db.close()
 
-    def test_apprise_failure_does_not_raise_or_retry_forever(self):
+    def test_apprise_failure_is_retried_after_persistent_backoff(self):
         from urllib.error import URLError
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -896,15 +963,40 @@ class NotificationTests(unittest.TestCase):
             db = importer.StateDB(cfg.state_db)
             grab = make_grab(HASH1, 1, "Example.Release.1080p")
             db.begin_pending(grab, cfg.name, {"title": "Example Film"}, 120)
-            db.fail_pending(HASH1, "metadata timeout", 1, 1)
+            db.conn.execute("UPDATE pending_adds SET attempt_count = ? WHERE hash = ?",
+                            (cfg.max_add_attempts, HASH1))
+            db.conn.commit()
+            db.fail_pending(HASH1, "metadata timeout", cfg.max_add_attempts, 1)
 
             with mock.patch.object(importer, "urlopen", side_effect=URLError("offline")) as send:
                 importer.dispatch_notifications(cfg, db)
-                self.assertEqual(len(db.unnotified_terminal_failures(cfg.name)), 0)
-                importer.dispatch_notifications(cfg, db)
                 self.assertEqual(send.call_count, 1)
-            db.close()
+            self.assertEqual(len(db.unnotified_terminal_failures(cfg.name)), 0)
+            row = db.pending_rows(cfg.name)[0]
+            self.assertEqual(row["notification_attempt_count"], 1)
+            self.assertIsNotNone(row["notification_next_retry_at"])
+            self.assertIsNone(row["notification_attempted_at"])
 
+            # Backoff prevents every timer run from immediately retrying the same delivery.
+            with mock.patch.object(importer, "urlopen") as send:
+                importer.dispatch_notifications(cfg, db)
+                send.assert_not_called()
+
+            db.conn.execute(
+                "UPDATE pending_adds SET notification_next_retry_at = ? WHERE hash = ?",
+                ("2000-01-01T00:00:00+00:00", HASH1),
+            )
+            db.conn.commit()
+            sent = []
+            with mock.patch.object(importer, "urlopen", side_effect=self.fake_apprise(sent)):
+                importer.dispatch_notifications(cfg, db)
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(sent[0]["payload"]["tag"], "critical")
+            self.assertEqual(db.unnotified_terminal_failures(cfg.name), [])
+            row = db.pending_rows(cfg.name)[0]
+            self.assertIsNotNone(row["notification_attempted_at"])
+            self.assertIsNone(row["notification_next_retry_at"])
+            db.close()
     def test_notification_disabled_makes_no_http_call(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = importer.replace(make_config(Path(tmp)), notifications_enabled=False)

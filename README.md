@@ -79,11 +79,13 @@ Verification means observable readiness or database presence; it does not claim 
 
 Default verification settings are verification_timeout_sec = 120, verification_poll_interval_sec = 3.0, retry_backoff_sec = 60 (doubling per failed attempt, capped at one hour), and max_add_attempts = 3. Compare the timeout with the TorrentDisconnectTimeout setting of the installed TorrServer build.
 
-## Aggregated Apprise notifications (v1.2.0)
+## Final-failure Apprise notifications (next revision)
 
-Notifications are opt-in through the shared Apprise API; the importer does not store Telegram tokens, chat IDs or topic IDs. For eligible instances, numeric-only warnings are sent when the retry-wait count or attempt distribution changes. When an item reaches a terminal failure, the importer groups newly failed items into a critical message containing the movie/series title, release title if available, attempts used, a sanitized reason and an optional direct Arr card link when `arr_ui_url` and Arr's `titleSlug` are available.
+Notifications are opt-in and use the shared Apprise API; arr2torr never stores Telegram tokens, chat IDs or topic IDs. **There are no Telegram messages while an item is still waiting for an automatic add/verification retry.** The importer waits until the failure is terminal (all configured add attempts are exhausted, or a permanent error makes retry impossible).
 
-Notification state is stored in the existing SQLite database to avoid repeating the same warnings or terminal alerts on every timer run. Apprise calls use a bounded timeout, are attempted at most once for a terminal group, and never change the import result. Notifications default to disabled in configuration examples. See [Installation and configuration](docs/INSTALLATION.md) and [Operations](docs/OPERATIONS.md).
+The final message goes to the critical tag and brings the entire action-oriented summary together: movie/series title, selected release, plain-language reason, attempts used, recommendation to choose another release in Radarr/Sonarr, and a direct Arr card link when available. When Seerr Watchlist integration is enabled, the same message reports whether the media was added, was already listed, or could not be registered. There is no second warning or Watchlist message for the same failure.
+
+Terminal notification state is stored in the existing SQLite database and is migrated in place. An unsuccessful Apprise request leaves the message pending and schedules another attempt with increasing delays (1, 5, 15, 30 and then 60 minutes, capped at one hour). A successful 2xx response marks the notification delivered. This is at-least-once delivery: if Apprise accepts a request but its response is lost, a retry can result in a duplicate. Delivery failures never change the TorrServer import result. Notifications remain disabled in example configs by default. See [Installation and configuration](docs/INSTALLATION.md) and [Operations](docs/OPERATIONS.md).
 
 ## Seerr Watchlist for terminal transfer failures (v1.3.0)
 
@@ -93,7 +95,7 @@ The optional Seerr integration registers a movie or whole series in the administ
 - Requires `seerr_url` and `seerr_api_key`. API-key requests use Seerr's administrator account (user ID 1) unless an explicit user override is sent; this integration does not send one.
 - Reads terminal `failed` rows from `pending_adds` and permanent `terminal_events` for the current Arr instance. `pending` and `retry_wait` are ignored.
 - Uses only the TMDb ID already stored in arr2torr. Missing IDs are recorded and reported; there is no separate metadata lookup.
-- Success/verified-existing items produce a grouped Apprise `warnings` message explaining that the TorrServer transfer failed and the item is tracked in Seerr for troubleshooting. Failure to register it produces an Apprise `critical` message.
+- The Seerr registration result is included in the same final critical transfer-failure message; there is no separate warnings or Seerr notification. A successful or verified-existing Watchlist entry is described naturally, while registration errors are reported honestly and are retried by the integration where applicable.
 - Watchlist processing state is stored in additional SQLite columns and is migrated in place. The import history and original TorrServer failure state remain intact.
 - The success notification is not an availability notification: a Watchlist item is **not necessarily available to watch**.
 
@@ -193,10 +195,10 @@ The current code package is **torr-arr-importer v1.3.1**. It uses Python 3.11+ a
 
 ## Current status
 
-Version **1.2.0 is installed and live-validated on MINI-Ubuntu** (2026-10-22). Both configured 1080p timer instances—Radarr and Sonarr—completed live runs successfully. New movie and series Grab records were transferred to TorrServer; successful additions were confirmed by post-add verification using observable file metadata, and later ordinary runs skipped hashes already present or previously handled.
+The installed MINI-Ubuntu implementation is torr-arr-importer **v1.3.1** (deployed 2026-10-24). The Radarr and Sonarr 1080p timer instances are the production instances; this does not imply that either 4K timer is enabled.
 
-The existing v1.2.0 Apprise notification flow was exercised end to end; v1.3.0 adds the opt-in Seerr Watchlist path and requires live API validation after a real Seerr key is configured. Warning messages and a grouped critical message were received in Telegram. For five warning sends and one critical send observed on 2026-10-22, the importer logged `APPRISE_SENT` with HTTP 200, and Apprise logged `Sent Telegram notification`, `Delivered Notification(s)` and HTTP 200. One earlier send at 10:36:52 logged HTTP 424 and a Telegram connection error; the exact relationship to a warning the user reports receiving could not be conclusively matched by timestamp. Subsequent observed sends succeeded.
+Historical v1.2.0 validation on 2026-10-22 confirmed end-to-end Apprise/Telegram sends for both warning and critical messages. The proposed notification redesign supersedes that behavior: it suppresses all user-facing messages during automatic retries and sends only one grouped critical summary when a failure becomes terminal. That summary includes the Arr card link and Seerr Watchlist status when available. This redesign has not yet been installed on MINI-Ubuntu.
 
-Not every torrent is guaranteed to become ready. During live Sonarr tests, one release remained absent from TorrServer's list after the 120-second verification deadline on repeated attempts and stayed in bounded retry state. The importer surfaced this through warning messages instead of falsely marking the release imported. The notification delivery path worked for those warnings. A terminal failure path was also exercised with Radarr, and its critical notification arrived.
+The redesign is also changing delivery semantics. Terminal events remain pending in the shared SQLite database until Apprise returns a successful 2xx response. Delivery errors are retried with persistent exponential backoff; this avoids silently discarding an alert after a single network/HTTP failure. Because an HTTP timeout can occur after the receiving API accepted a request, delivery is at-least-once rather than a strict exactly-once guarantee.
 
-The importer remains conservative: TorrServer membership and shared SQLite history are compared on each run, only verified additions enter successful import history, failures are logged and normal operation does not override a deliberate removal decision. Only the Radarr/Sonarr 1080p timers were validated as enabled and active; this status does not imply that either 4K timer is enabled.
+The importer remains conservative: TorrServer membership and shared SQLite history are compared on each run, only verified additions enter successful import history, and normal operation does not override a deliberate removal decision. Successful transfer verification still does not guarantee that peers/network conditions will make playback smooth.

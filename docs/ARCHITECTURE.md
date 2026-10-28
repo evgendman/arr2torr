@@ -1,6 +1,6 @@
 # Architecture and state model
 
-This document describes the current **torr-arr-importer v1.2.0** behavior and data mapping. The existing TorrServer metadata payload retains the core field subset introduced in v1.0.3; v1.1.0 added asynchronous add verification and bounded retries, and v1.2.0 adds aggregated Apprise notifications.
+This document describes the current **torr-arr-importer v1.3.1** implementation and the unreleased terminal-notification redesign. The existing TorrServer metadata payload retains the core field subset introduced in v1.0.3; v1.1/v1.2/v1.3 added asynchronous add verification, notifications and Seerr state. The new notification contract below is not deployed until a reviewed release is installed.
 
 ## 1. Source of truth
 
@@ -175,18 +175,18 @@ target_quality is descriptive configuration data. It represents which Arr lane c
 
 ## 10. Notification state and failure summaries
 
-Notification delivery is an auxiliary side effect and does not change import, retry or exit semantics. Configured instances send POST JSON to `<apprise_url>/notify/<config_key>`; routing is selected by the `critical` or `warnings` tag, with Apprise type `failure` or `warning`. The importer never stores Telegram credentials.
+The planned terminal-only behavior sends no messages for pending or retry_wait attempts. Once a failure is terminal—or a permanent preparation error prevents the TorrServer add—the importer creates a grouped critical/failure message with media title, selected release title, a plain-language cause, attempts used or a permanent-error explanation, a recommendation to choose another release, and an optional Arr card link. If Seerr Watchlist is enabled, the same message includes the latest registration result. No separate warnings message or Seerr notification is emitted.
 
-The existing SQLite database is extended in place:
-- `pending_adds.media_title` stores the Arr media title separately from the selected release title in `pending_adds.title`.
-- `pending_adds.title_slug` stores the Arr-provided slug used for an optional browser-facing card URL.
-- `pending_adds.notification_attempted_at` makes final alerts one-shot; failures already in `failed` before the v1.2.0 migration are baselined to avoid historical notification floods.
-- `notification_state` stores a per-instance fingerprint of the retry-wait count and attempt-number distribution. Names and identities are intentionally excluded from this fingerprint and interim message.
-- `terminal_events` deduplicates permanent errors that occur before an add can be created, such as an expired Arr history download URL (HTTP 410).
+Terminal notification state is extended in place in the existing SQLite DB:
+- notification_attempted_at is set only after a successful 2xx response from Apprise.
+- notification_attempt_count, notification_next_retry_at and notification_last_error retain delivery retry state when Apprise is unavailable.
+- Retry delays increase (1, 5, 15, 30 and then 60 minutes, one-hour cap) and survive process restarts.
+- Permanent errors before an add are deduplicated in terminal_events; failed verification attempts are persisted in pending_adds.
+- Distinct terminal rows without TMDb IDs remain distinct messages; the notification path does not merge them by a missing identifier.
 
-The optional `arr_ui_url` is a browser-facing base URL, separate from `arr_url` (the API base). A link is built from the media `titleSlug` and the instance type (`/movie/<slug>` for Radarr or `/series/<slug>` for Sonarr); if either value is unavailable, the alert omits the link. Verify the configured base URL is reachable from the receiving Telegram client.
+The optional arr_ui_url is a browser-facing base URL, separate from arr_url (the API base). A link is built from the Arr titleSlug and the instance type (/movie/<slug> for Radarr or /series/<slug> for Sonarr); if either value is unavailable, the alert omits the link.
 
-The Apprise request uses a bounded timeout and no retry loop. Delivery failures are written to the local service log only; the importer does not recursively notify about notification failures. A terminal alert is marked attempted after one delivery attempt, avoiding repeated alerts on every timer cycle.
+Apprise delivery is at-least-once. If a request times out after Apprise has already accepted it, retrying may duplicate the message; strict exactly-once delivery cannot be inferred from a timed-out HTTP request. Delivery failures are logged locally and do not change import/retry state or trigger recursive alerts. The legacy notification_tag_warning setting is still parsed for compatibility, but current user-facing alerts use only notification_tag_critical.
 
 ## 11. Component boundaries
 

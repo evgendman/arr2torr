@@ -2,6 +2,23 @@
 
 This document records the current **torr-arr-importer v1.3.1** implementation separately from remaining work and live validation.
 
+## Unreleased notification UX and delivery revision
+
+The previously documented v1.2 notification behavior (numeric retry warnings plus separate terminal and Seerr messages) is historical and is superseded by this revision.
+
+- [x] Suppress user-facing messages while automatic add/verification retries remain possible; do not send anonymous count-only warnings.
+- [x] Send only the final grouped critical notification at terminal failure or permanent preparation error.
+- [x] Use natural Russian wording: explain that the selected release could not be transferred to TorrServer, state the useful reason, recommend selecting another release in Radarr/Sonarr, and include the direct card link where available.
+- [x] Include the current Seerr Watchlist result in that same message; do not send a second Watchlist warning or separate retry warning.
+- [x] Keep different terminal errors separate when their TMDb IDs are missing.
+- [x] Mark a terminal notification delivered only after Apprise responds with HTTP 2xx. Store retry count/time/error in the existing SQLite DB, retry delivery with a persistent backoff capped at one hour, and do not alter transfer state.
+- [x] Add regression coverage for quiet retry states, one final message with Seerr status, distinct no-TMDb records, and delivery recovery after an Apprise failure.
+- [ ] Review CI on Python 3.11/3.12 and merge the change.
+- [ ] Deploy a reviewed release to MINI-Ubuntu and inspect an actual Telegram message before treating the wording as live-accepted.
+
+Delivery is at-least-once: after an ambiguous timeout Apprise may already have accepted a message, and a retry can rarely duplicate it. No exactly-once guarantee is claimed. The application version on MINI-Ubuntu remains v1.3.1 until the new release is deliberately installed.
+
+
 ## Implemented
 
 - One standard-library Python implementation for both Radarr and Sonarr.
