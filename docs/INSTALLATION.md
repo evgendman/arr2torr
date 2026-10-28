@@ -42,7 +42,7 @@ The upgrade adds three columns to the existing `pending_adds` table in-place. It
        python3 -m py_compile "$SRC/src/importer.py"
        (cd "$SRC" && python3 -m unittest discover -s tests -v)
        python3 "$SRC/src/importer.py" --version
-       printf '%s\\n' "$SRC" > /tmp/arr2torr-v1.3.2-source-path
+       printf '%s\n' "$SRC" > /tmp/arr2torr-v1.3.2-source-path
 
    The expected version output is `1.3.2`; CI has passed 40 tests on Python 3.11 and 40 on Python 3.12. Use this path only after the candidate has been approved for live validation/deployment.
 
@@ -73,7 +73,7 @@ The upgrade adds three columns to the existing `pending_adds` table in-place. It
        dst.close()
        src.close()
        PY
-       printf '%s\\n' "$BACKUP" > /tmp/arr2torr-v1.3.2-backup-path
+       printf '%s\n' "$BACKUP" > /tmp/arr2torr-v1.3.2-backup-path
        echo "Backup saved under: $BACKUP"
 
 4. Install the staged source. The installer preserves existing API keys/configuration values and does not clear the state database:
