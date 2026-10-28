@@ -837,8 +837,8 @@ class NotificationTests(unittest.TestCase):
             self.assertEqual(payload["tag"], "critical")
             self.assertEqual(payload["type"], "failure")
             self.assertIn("Окончательные ошибки передачи в TorrServer: 2.", payload["body"])
-            self.assertIn("Автоматические попытки исчерпаны: 3 из 3.", payload["body"])
-            self.assertIn("Рекомендация: выберите другую раздачу в Radarr", payload["body"])
+            self.assertIn("Автоматические попытки закончились (3 из 3).", payload["body"])
+            self.assertIn("Советуем выбрать другую раздачу в Radarr", payload["body"])
             self.assertIn("All Good Things", payload["body"])
             self.assertIn("All.Good.Things.2010.1080p.WEB-DL", payload["body"])
             self.assertIn("http://192.168.0.14:7878/movie/all-good-things-2010-603", payload["body"])
@@ -883,9 +883,9 @@ class NotificationTests(unittest.TestCase):
             payload = sent[0]["payload"]
             self.assertEqual(payload["tag"], "critical")
             self.assertEqual(payload["type"], "failure")
-            self.assertIn("не удалось передать выбранную раздачу в torrserver", payload["body"].lower())
-            self.assertIn("рекомендация: выберите другую раздачу в radarr", payload["body"].lower())
-            self.assertIn("добавлено в watchlist администратора seerr", payload["body"].lower())
+            self.assertIn("не удалось добавить выбранную раздачу в torrserver", payload["body"].lower())
+            self.assertIn("советуем выбрать другую раздачу в radarr", payload["body"].lower())
+            self.assertIn("фильм добавлен в watchlist администратора seerr", payload["body"].lower())
             self.assertIn("http://192.168.0.14:7878/movie/example-film-2026", payload["body"])
             self.assertNotIn('"tag": "warnings"', repr(sent))
             db.close()
@@ -920,7 +920,7 @@ class NotificationTests(unittest.TestCase):
             body = sent[0]["payload"]["body"]
             self.assertIn("Unknown Movie Alpha", body)
             self.assertIn("Unknown Movie Beta", body)
-            self.assertEqual(body.count("Не удалось добавить медиа в Watchlist Seerr"), 2)
+            self.assertEqual(body.count("Не удалось добавить фильм в Watchlist Seerr"), 2)
             db.close()
 
     def test_permanent_prepare_failure_is_aggregated_without_leaking_url(self):
@@ -997,6 +997,7 @@ class NotificationTests(unittest.TestCase):
             self.assertIsNotNone(row["notification_attempted_at"])
             self.assertIsNone(row["notification_next_retry_at"])
             db.close()
+
     def test_notification_disabled_makes_no_http_call(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = importer.replace(make_config(Path(tmp)), notifications_enabled=False)
