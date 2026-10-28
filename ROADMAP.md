@@ -322,7 +322,7 @@ The importer already preserves provider IDs and selected Arr fields in TorrServe
 
 ### 10. Automatically blocklist terminally failed Radarr releases
 
-**Status: implementation added in v1.3.2; Python 3.11/3.12 CI passes on the prior code revision (40 tests per runtime). Latest attempt-limit notification change is awaiting CI. Controlled live Radarr validation remains necessary before deployment.**
+**Status: implementation added in v1.3.2; latest GitHub Actions run passes on Python 3.11 and 3.12 (40 tests per runtime). Controlled live Radarr validation remains necessary before deployment.**
 
 **Goal**
 
@@ -359,7 +359,7 @@ Reduce manual intervention by automatically excluding a release from future Rada
 - [x] Add in-place state migration and per-item action/verification status; mark pre-upgrade failed rows as legacy_skipped.
 - [x] Add blocklist outcome to the existing terminal Apprise message and structured result logs, including a skipped log when disabled.
 - [x] Add tests for default-enabled TOML, exact attempt-limit boundary, native endpoint behavior, Radarr-only scope, ambiguous-result recovery, permanent API errors, state migration, and notification wording.
-- [x] Confirm Python 3.11 and 3.12 GitHub Actions checks pass on the preceding revision (40 tests per runtime).
+- [x] Confirm Python 3.11 and 3.12 GitHub Actions checks pass on the latest code/test revision (40 tests per runtime).
 - [ ] Validate a deliberately selected failed Grab in a controlled live Radarr environment before deployment.
 
 ## Explicitly not planned
