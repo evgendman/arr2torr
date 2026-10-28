@@ -38,7 +38,7 @@ The upgrade adds three columns to the existing `pending_adds` table in-place. It
        set -euo pipefail
        SRC="$(mktemp -d /tmp/arr2torr-v1.3.2.XXXXXX)"
        git clone --branch feature/radarr-blocklist-v1.3.2 https://github.com/evgendman/arr2torr.git "$SRC"
-       git -C "$SRC" checkout d0975787b0f58e54dd6c482701c38ff062f83978
+       git -C "$SRC" checkout d1ddda5c9fb601fa5c06717aa89e5732632be319
        python3 -m py_compile "$SRC/src/importer.py"
        (cd "$SRC" && python3 -m unittest discover -s tests -v)
        python3 "$SRC/src/importer.py" --version
