@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — terminal-only notifications and durable delivery
+## Candidate v1.3.2 — terminal-only notifications and durable delivery
 
 - Stop sending user-facing messages for retry-wait states. Users are notified only when add/verification reaches terminal failure or a permanent preparation error prevents the add.
 - Send one aggregated critical/failure message containing the media and selected-release titles, a plain-language cause, attempts used or permanent-failure context, a recommendation to choose another release in Radarr/Sonarr, the Arr card link when available, and the current Seerr Watchlist result.
