@@ -896,7 +896,14 @@ state_db = "{Path(tmp) / 'state.db'}"
                 self.assertEqual(db.pending_rows(cfg.name)[0]["attempt_count"], 1)
                 importer.process_radarr_blocklist(cfg, arr, db)
                 self.assertEqual(calls, [])
-                self.assertIsNone(db.pending_rows(cfg.name)[0]["radarr_blocklist_status"])
+                self.assertEqual(
+                    db.pending_rows(cfg.name)[0]["radarr_blocklist_status"],
+                    "skipped_attempt_limit",
+                )
+                self.assertIn(
+                    "configured attempt limit has not been exhausted",
+                    db.pending_rows(cfg.name)[0]["radarr_blocklist_last_error"],
+                )
             finally:
                 db.close()
 
