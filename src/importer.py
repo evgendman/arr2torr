@@ -1473,6 +1473,10 @@ def terminal_notification_block(cfg: Config, row: dict[str, Any], *, preparation
         lines.append("Этап: добавление или подтверждение в TorrServer")
     reason_text = safe_notification_text(row.get("reason") or row.get("last_error") or "", 180)
     lines.append(f"Причина: {reason_text}")
+    link = arr_card_url(cfg, row.get("title_slug"))
+    if link:
+        lines.append(f"Карточка Arr: {link}")
+    # The configured blocklist result is deliberately the final item in the alert.
     blocklist_status = str(row.get("radarr_blocklist_status") or "")
     if not preparation and cfg.arr_type == "radarr" and cfg.radarr_blocklist_enabled:
         blocklist_error = safe_notification_text(
@@ -1492,9 +1496,6 @@ def terminal_notification_block(cfg: Config, row: dict[str, Any], *, preparation
                 lines.append(f"Причина блокировки: {blocklist_error}")
         elif blocklist_status == "legacy_skipped":
             lines.append("Блок-лист Radarr: эта ошибка относится к периоду до обновления; автоматическая блокировка задним числом не выполнялась.")
-    link = arr_card_url(cfg, row.get("title_slug"))
-    if link:
-        lines.append(f"Карточка Arr: {link}")
     return "\n".join(lines)
 
 
