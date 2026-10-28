@@ -64,6 +64,24 @@ Arr often focuses on the final chosen download in a conventional workflow. Howev
 
 That means different versions of one movie or series can coexist in TorrServer. The downstream library can expose each one as a distinct root with its own source identity and allow the viewer to choose.
 
+## Radarr blocklisting after terminal TorrServer failure (v1.3.2)
+
+radarr_blocklist_enabled defaults to true for Radarr. It can be disabled per Radarr config with radarr_blocklist_enabled = false; Sonarr profiles never execute this path.
+
+The importer acts only on pending_adds rows whose TorrServer add/verification workflow reached terminal status = 'failed' after the configured attempt limit (or a terminal rejection after an add request). It calls Radarr's native POST /api/v3/history/failed/{arr_history_id} for that specific Grab history record. Radarr runs its normal failed-download pipeline to create the blocklist entry and can initiate a replacement search according to Radarr's settings. A retry_wait row is not blocklisted; preparation errors in terminal_events (for example, an expired download URL before the TorrServer add) are also excluded.
+
+Look for these log events:
+
+- RADARR_BLOCKLIST_BLOCKED: Radarr accepted the native failed-history action.
+- RADARR_BLOCKLIST_ALREADY_PRESENT: after an ambiguous request, a blocklist entry with the same source release title was found.
+- RADARR_BLOCKLIST_VERIFY_PENDING: the request outcome is ambiguous; the importer is performing read-only checks and does not resend the failed-history request.
+- RADARR_BLOCKLIST_FAILED: identity was missing, Radarr rejected the operation, or verification remained inconclusive after three successful checks.
+- RADARR_BLOCKLIST_SKIPPED: the setting is disabled.
+
+Radarr's public BlocklistResource currently does not expose the torrent infohash. Therefore, recovery after an ambiguous response can match sourceTitle for that movie, but cannot independently prove that the matched entry has the same hash. The normal path does not use a fake POST /blocklist endpoint; it relies on Radarr's own history/failed API.
+
+The blocklist outcome is appended to the existing grouped terminal Apprise failure notification, not sent as a separate message. If Apprise is disabled, the result remains in the logs. The new state fields are migrated in-place in the shared SQLite database. Existing terminal failures found during the first migration are marked legacy_skipped to prevent retroactive mass blocklisting; new terminal failures are processed automatically. Deliberately re-arming an exhausted attempt with --retry-failed resets its blocklist state.
+
 ## Seerr Watchlist tracking (v1.3.0)
 
 When `seerr_watchlist_enabled = true`, the importer also processes terminal failures stored in `pending_adds` (`status = 'failed'`) and permanent `terminal_events` for the current Arr instance.
