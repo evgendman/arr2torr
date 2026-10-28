@@ -802,6 +802,24 @@ class RadarrBlocklistTests(unittest.TestCase):
     def test_blocklist_is_enabled_by_default(self):
         self.assertTrue(make_config(Path("/tmp")).radarr_blocklist_enabled)
 
+    def test_toml_omission_defaults_radarr_blocklist_to_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "radarr.toml"
+            config_path.write_text(
+                f"""
+name = "radarr-1080"
+arr_type = "radarr"
+arr_url = "http://127.0.0.1:7878"
+arr_api_key = "test-key"
+torrserver_url = "http://127.0.0.1:8092"
+category = "movie"
+target_quality = 1080
+state_db = "{Path(tmp) / 'state.db'}"
+""",
+                encoding="utf-8",
+            )
+            self.assertTrue(importer.config_from_file(str(config_path)).radarr_blocklist_enabled)
+
     def test_terminal_failure_uses_native_radarr_failed_history_endpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg, db = self.make_failed(Path(tmp))
