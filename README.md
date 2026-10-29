@@ -4,7 +4,7 @@
 
 arr2torr is the project and documentation home for **torr-arr-importer**, a polling service that transfers releases selected with **Grab** in Radarr or Sonarr directly to the TorrServer API. It is intended for a media workflow where the user wants to start streaming from TorrServer, then expose those streams to a media library through STRM files or another integration.
 
-The current implementation described here is **torr-arr-importer v1.3.3**.
+The current code candidate described here is **torr-arr-importer v1.3.4** (PR #4; not yet deployed to MINI-Ubuntu).
 
 ## Why this exists
 
@@ -60,7 +60,7 @@ With the usual five-minute timer, a successfully grabbed release is normally tra
 - Resolves the Arr history data.downloadUrl. In the tested Prowlarr setup, this URL redirects to the original magnet link.
 - Adds the torrent through TorrServer's /torrents API, including the Arr title, media category and a safe subset of Arr metadata in data.
 - Uses one shared SQLite database across all importer instances for verified imports and restart-safe pending attempts.
-- Treats the initial TorrServer add response as an acknowledgement; success is recorded when the exact infohash appears in TorrServer's action=list response.
+- Treats the initial add response and exact-hash membership in `action=list` as intermediate signals; success requires usable `FileStats` for that hash.
 - Submits candidates first and verifies the batch with one polling loop and per-hash deadlines rather than serially waiting for each add.
 - Retries unverified attempts with bounded exponential backoff and avoids resending hashes that are still pending on TorrServer.
 - Supports non-mutating --dry-run, deliberate --rebuild, and explicit --retry-failed for exhausted unverified attempts.
@@ -72,15 +72,15 @@ With the usual five-minute timer, a successfully grabbed release is normally tra
 
 TorrServer may acknowledge an add request before its background metadata acquisition completes. An expected hash in the initial response is therefore not treated as final success.
 
-The importer persists a pending attempt before the add request, submits eligible releases first, then polls the TorrServer list at a configurable interval. Every pending hash has its own deadline. In v1.3.3, success is recorded only after the exact infohash appears in a subsequent TorrServer `action=list` response. This confirms list membership only; it does not require FileStats/readiness and does not prove that playback will work or that data is durably committed.
+The importer persists a pending attempt before the add request, submits eligible releases first, then polls TorrServer at a configurable interval. Every pending hash has its own deadline. In the v1.3.4 candidate, the exact hash must expose a non-empty, usable `FileStats` list before it is recorded as a successful import. Entries need positive unique file IDs and unique safe relative paths. If a hash is present but incomplete, the importer inspects the live object with `action=get` rather than blindly sending another add; a DB-only `Torrent in db` record gets a bounded metadata-activation request before polling continues. The immediate response and list membership are not final success.
 
 Pending attempts live in the shared SQLite table pending_adds and do not contain the credential-bearing download URL. After a process restart, they are reconciled against TorrServer before retrying. Failures use bounded exponential backoff and stop automatically after the configured attempt limit; --retry-failed explicitly re-queues exhausted, never-confirmed attempts for the selected Arr instance.
 
-Verification means the exact infohash appears in TorrServer's action=list response. This confirms list membership, not media-file readiness, streamability or a durable disk commit. Older successful-import records remain protected from automatic resurrection. Use --rebuild only when intentionally repopulating missing historical entries.
+Verification means TorrServer exposes usable `FileStats` for the exact hash. Mere list membership does not confirm file structure or downstream readiness. Older successful-import records that are absent from TorrServer remain protected from automatic resurrection; because v1.3.3 did not store verification provenance, pre-existing success rows are not automatically reclassified. Use `--rebuild` only when deliberately repopulating missing historical entries.
 
 Default verification settings are verification_timeout_sec = 120, verification_poll_interval_sec = 3.0, retry_backoff_sec = 60 (doubling per failed attempt, capped at one hour), and max_add_attempts = 3. Compare the timeout with the TorrentDisconnectTimeout setting of the installed TorrServer build.
 
-## Final-failure Apprise notifications (v1.3.2; retained in v1.3.3)
+## Final-failure Apprise notifications (introduced in v1.3.2; retained in v1.3.4 candidate)
 
 Notifications are opt-in and use the shared Apprise API; arr2torr never stores Telegram tokens, chat IDs or topic IDs. **There are no Telegram messages while an item is still waiting for an automatic add/verification retry.** The importer waits until the failure is terminal (all configured add attempts are exhausted, or a permanent error makes retry impossible).
 
@@ -88,7 +88,7 @@ The final message goes to the critical tag and brings the entire action-oriented
 
 Terminal notification state is stored in the existing SQLite database and is migrated in place. An unsuccessful Apprise request leaves the message pending and schedules another attempt with increasing delays (1, 5, 15, 30 and then 60 minutes, capped at one hour). A successful 2xx response marks the notification delivered. This is at-least-once delivery: if Apprise accepts a request but its response is lost, a retry can result in a duplicate. Delivery failures never change the TorrServer import result. Notifications remain disabled in example configs by default. See [Installation and configuration](docs/INSTALLATION.md) and [Operations](docs/OPERATIONS.md).
 
-## Automatic Radarr blocklist after terminal transfer failure (introduced in v1.3.2; reconciled in v1.3.3)
+## Automatic Radarr blocklist after terminal transfer failure (introduced in v1.3.2; retained in v1.3.4 candidate)
 
 The Radarr-only setting radarr_blocklist_enabled defaults to true, including when it is omitted from an existing TOML file. Once a release reaches terminal TorrServer add/verification failure after all configured attempts, arr2torr calls Radarr's native POST /api/v3/history/failed/{historyId} endpoint for that Grab history record. Radarr then handles the failure and blocklist through its own supported pipeline; this can allow replacement searching according to Radarr's own settings.
 
@@ -199,7 +199,7 @@ The current stored data subset includes source instance name, media type, target
 - [Roadmap and validation status](ROADMAP.md)
 - [Version history](CHANGELOG.md)
 
-The current code package is **torr-arr-importer v1.3.3**. It uses Python 3.11+ and the standard library; it does not require external Python packages.
+The current code candidate is **torr-arr-importer v1.3.4**. It uses Python 3.11+ and the standard library; it does not require external Python packages.
 
 ## Related project: STRM/NFO library generation
 
@@ -207,8 +207,8 @@ The current code package is **torr-arr-importer v1.3.3**. It uses Python 3.11+ a
 
 ## Current status
 
-MINI-Ubuntu is running `torr-arr-importer 1.3.3` from PR #4 branch `feature/radarr-blocklist-v1.3.2`, commit `7e8feb7`. The code-only deployment preserves the existing TOML configuration, SQLite state and systemd units. PR #4 remains open and unmerged; no tagged release is claimed.
+MINI-Ubuntu remains on `torr-arr-importer 1.3.3` from PR #4 branch `feature/radarr-blocklist-v1.3.2`, commit `7e8feb7`. The v1.3.4 code candidate and regression tests are on that still-open PR; this preparation did not change the host, its TOML configuration, SQLite state or systemd units. No tagged release or live TorrServer validation is claimed.
 
-During the 10-hour journal window ending 2026-10-29 09:45 (+05:00), the Radarr service completed 115 runs. It submitted 79 add requests, and all 79 were confirmed by exact hash membership in a subsequent TorrServer list response. There were zero failed additions and no importer `ERROR`/exception events. The six newer-Grab re-arm warnings and five stale-pending cleanup events were expected reconciliation actions.
+During the 10-hour journal window ending 2026-10-29 09:45 (+05:00), the Radarr service completed 115 runs. It submitted 79 add requests, and all 79 were confirmed by exact hash membership in a subsequent TorrServer list response. This is historical evidence under the v1.3.3 criterion only; it is not evidence that all 79 had usable `FileStats`. There were zero logged failed additions and no importer `ERROR`/exception events in that window.
 
-The zero-seed `Viking Quest (2014) BDRip 720p | P2` release was accepted and appeared in TorrServer's list on the first attempt. That validates the list-membership success rule but **does not validate terminal-failure blocklisting**. The remaining live test is a release that never appears in the list after all three configured attempts, followed by confirmation of Radarr's native blocklist entry and the grouped critical Apprise notification. Since no terminal failure occurred in the reviewed window, Apprise delivery was not exercised during that window. See [Roadmap and validation status](ROADMAP.md).
+The zero-seed `Viking Quest (2014) BDRip 720p | P2` release was accepted and appeared in TorrServer's list on the first attempt. The v1.3.4 candidate requires valid `FileStats`, but still needs live validation on MINI-Ubuntu. The remaining live tests are (1) a release that becomes FileStats-ready and is processed by `torr2strm`, and (2) a release that never obtains usable `FileStats` across all three attempts, followed by verification of Radarr's native blocklist entry and the grouped critical Apprise notification. See [Roadmap and validation status](ROADMAP.md).
