@@ -66,7 +66,7 @@ That means different versions of one movie or series can coexist in TorrServer. 
 
 ## Radarr blocklisting after terminal TorrServer failure (implemented and live-validated on MINI-Ubuntu, 2026-10-29)
 
-radarr_blocklist_enabled defaults to true for Radarr. It can be disabled per Radarr config with radarr_blocklist_enabled = false; Sonarr profiles never execute this path.
+Every Radarr example TOML explicitly sets `radarr_blocklist_enabled = true`; use the same explicit setting in each active Radarr config. The code default of `true` when this key is absent is a backward-compatibility fallback, not a substitute for a visible operational setting. Set `radarr_blocklist_enabled = false` only when intentionally disabling the feature. Sonarr profiles never execute this path.
 
 The importer acts only on pending_adds rows whose TorrServer add/verification workflow reached status = 'failed' and whose recorded attempt_count is at least max_add_attempts. A permanent API rejection before that configured attempt limit is reached is not sufficient to blocklist the release. It calls Radarr's native POST /api/v3/history/failed/{arr_history_id} for that specific Grab history record. Radarr runs its normal failed-download pipeline to create the blocklist entry and can initiate a replacement search according to Radarr's settings. A retry_wait row is not blocklisted; preparation errors in terminal_events (for example, an expired download URL before the TorrServer add) are also excluded.
 
