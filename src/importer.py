@@ -21,14 +21,14 @@ import sys
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 
-VERSION = "1.3.1"
+VERSION = "1.3.5"
 DEFAULT_PAGE_SIZE = 1000
 DEFAULT_TIMEOUT = 30
 
@@ -85,7 +85,7 @@ class Config:
     state_db: str
     history_page_size: int = DEFAULT_PAGE_SIZE
     timeout: int = DEFAULT_TIMEOUT
-    user_agent: str = "torr-arr-importer/1.3.1"
+    user_agent: str = "torr-arr-importer/1.3.5"
     log_level: str = "INFO"
     log_file: str = ""
     retry_count: int = 2
@@ -96,6 +96,8 @@ class Config:
     verification_poll_interval_sec: float = 3.0
     retry_backoff_sec: int = 60
     max_add_attempts: int = 3
+    radarr_blocklist_enabled: bool = True
+    sonarr_blocklist_enabled: bool = True
     arr_ui_url: str = ""
     notifications_enabled: bool = False
     apprise_url: str = ""
@@ -370,14 +372,24 @@ class StateDB:
                 status TEXT NOT NULL DEFAULT 'pending',
                 last_checked_at TEXT,
                 last_status TEXT,
+                metadata_activation_attempt INTEGER,
                 last_error TEXT,
                 next_retry_at TEXT,
                 notification_attempted_at TEXT,
+                notification_attempt_count INTEGER NOT NULL DEFAULT 0,
+                notification_next_retry_at TEXT,
+                notification_last_error TEXT,
                 seerr_watchlist_status TEXT,
                 seerr_watchlist_last_error TEXT,
                 seerr_watchlist_error_fingerprint TEXT,
                 seerr_watchlist_error_notified_fingerprint TEXT,
-                seerr_watchlist_warning_notified_at TEXT
+                seerr_watchlist_warning_notified_at TEXT,
+                radarr_blocklist_status TEXT,
+                radarr_blocklist_last_error TEXT,
+                radarr_blocklist_verify_misses INTEGER NOT NULL DEFAULT 0,
+                sonarr_blocklist_status TEXT,
+                sonarr_blocklist_last_error TEXT,
+                sonarr_blocklist_verify_misses INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_pending_source_status
                 ON pending_adds(source, status);
@@ -403,6 +415,9 @@ class StateDB:
                 tvdb_id TEXT,
                 created_at TEXT NOT NULL,
                 notification_attempted_at TEXT,
+                notification_attempt_count INTEGER NOT NULL DEFAULT 0,
+                notification_next_retry_at TEXT,
+                notification_last_error TEXT,
                 seerr_watchlist_status TEXT,
                 seerr_watchlist_last_error TEXT,
                 seerr_watchlist_error_fingerprint TEXT,
@@ -422,15 +437,27 @@ class StateDB:
             for row in self.conn.execute("PRAGMA table_info(pending_adds)").fetchall()
         }
         added_notification_marker = "notification_attempted_at" not in columns
+        added_radarr_blocklist_marker = "radarr_blocklist_status" not in columns
+        added_sonarr_blocklist_marker = "sonarr_blocklist_status" not in columns
         migrations = {
             "media_title": "TEXT",
             "title_slug": "TEXT",
+            "metadata_activation_attempt": "INTEGER",
             "notification_attempted_at": "TEXT",
+            "notification_attempt_count": "INTEGER NOT NULL DEFAULT 0",
+            "notification_next_retry_at": "TEXT",
+            "notification_last_error": "TEXT",
             "seerr_watchlist_status": "TEXT",
             "seerr_watchlist_last_error": "TEXT",
             "seerr_watchlist_error_fingerprint": "TEXT",
             "seerr_watchlist_error_notified_fingerprint": "TEXT",
             "seerr_watchlist_warning_notified_at": "TEXT",
+            "radarr_blocklist_status": "TEXT",
+            "radarr_blocklist_last_error": "TEXT",
+            "radarr_blocklist_verify_misses": "INTEGER NOT NULL DEFAULT 0",
+            "sonarr_blocklist_status": "TEXT",
+            "sonarr_blocklist_last_error": "TEXT",
+            "sonarr_blocklist_verify_misses": "INTEGER NOT NULL DEFAULT 0",
         }
         for column, column_type in migrations.items():
             if column not in columns:
@@ -442,6 +469,9 @@ class StateDB:
         terminal_migrations = {
             "tmdb_id": "TEXT",
             "tvdb_id": "TEXT",
+            "notification_attempt_count": "INTEGER NOT NULL DEFAULT 0",
+            "notification_next_retry_at": "TEXT",
+            "notification_last_error": "TEXT",
             "seerr_watchlist_status": "TEXT",
             "seerr_watchlist_last_error": "TEXT",
             "seerr_watchlist_error_fingerprint": "TEXT",
@@ -456,6 +486,16 @@ class StateDB:
             self.conn.execute(
                 "UPDATE pending_adds SET notification_attempted_at = ? WHERE status = 'failed'",
                 (datetime.now(timezone.utc).isoformat(),),
+            )
+        if added_radarr_blocklist_marker:
+            # Do not retrospectively mark a batch of pre-upgrade failed rows as failed in Radarr.
+            self.conn.execute(
+                "UPDATE pending_adds SET radarr_blocklist_status = 'legacy_skipped' WHERE status = 'failed'"
+            )
+        if added_sonarr_blocklist_marker:
+            # Do not retroactively invoke Sonarr for terminal failures that predate this feature.
+            self.conn.execute(
+                "UPDATE pending_adds SET sonarr_blocklist_status = 'legacy_skipped' WHERE status = 'failed'"
             )
         self.conn.commit()
 
@@ -581,7 +621,13 @@ class StateDB:
                   seerr_watchlist_last_error=NULL,
                   seerr_watchlist_error_fingerprint=NULL,
                   seerr_watchlist_error_notified_fingerprint=NULL,
-                  seerr_watchlist_warning_notified_at=NULL
+                  seerr_watchlist_warning_notified_at=NULL,
+                  radarr_blocklist_status=NULL,
+                  radarr_blocklist_last_error=NULL,
+                  radarr_blocklist_verify_misses=0,
+                  sonarr_blocklist_status=NULL,
+                  sonarr_blocklist_last_error=NULL,
+                  sonarr_blocklist_verify_misses=0
                 """,
                 (
                     grab.hash, source, grab.history_id, grab.arr_media_id,
@@ -600,6 +646,28 @@ class StateDB:
         except Exception:
             self.conn.rollback()
             raise
+
+    def metadata_activation_attempt(self, torrent_hash: str) -> int | None:
+        row = self.conn.execute(
+            "SELECT metadata_activation_attempt FROM pending_adds WHERE hash = ?",
+            (torrent_hash,),
+        ).fetchone()
+        return as_int(row["metadata_activation_attempt"]) if row is not None else None
+
+    def mark_metadata_activation_attempt(self, torrent_hash: str, attempt_count: int) -> bool:
+        """Atomically allow one DB-only metadata activation request per verification attempt."""
+        with self.conn:
+            cur = self.conn.execute(
+                """
+                UPDATE pending_adds
+                SET metadata_activation_attempt = ?, last_checked_at = ?,
+                    last_status = 'metadata-activation-requested'
+                WHERE hash = ? AND status = 'pending' AND attempt_count = ?
+                  AND (metadata_activation_attempt IS NULL OR metadata_activation_attempt != ?)
+                """,
+                (attempt_count, iso_now(), torrent_hash, attempt_count, attempt_count),
+            )
+        return cur.rowcount == 1
 
     def observe_pending(
         self,
@@ -626,7 +694,13 @@ class StateDB:
                 UPDATE pending_adds
                 SET status = 'pending', deadline_at = ?, last_checked_at = ?,
                     last_status = ?, last_error = NULL, next_retry_at = NULL,
-                    notification_attempted_at = NULL
+                    notification_attempted_at = NULL,
+                    radarr_blocklist_status = NULL,
+                    radarr_blocklist_last_error = NULL,
+                    radarr_blocklist_verify_misses = 0,
+                     sonarr_blocklist_status = NULL,
+                     sonarr_blocklist_last_error = NULL,
+                     sonarr_blocklist_verify_misses = 0
                 WHERE hash = ? AND status IN ('retry_wait', 'failed')
                 """,
                 (deadline, iso_now(), observed_status[:200], torrent_hash),
@@ -691,6 +765,45 @@ class StateDB:
             self.conn.execute("DELETE FROM pending_adds WHERE hash = ?", (torrent_hash,))
         return value
 
+    def rearm_failed_for_new_grab(
+        self, grab: Grab, source: str, verification_timeout_sec: int,
+    ) -> bool:
+        """Re-arm a terminal failure only for a newer Radarr Grab of the same hash."""
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat()
+        deadline_text = (now + timedelta(seconds=verification_timeout_sec)).isoformat()
+        download_id = str(grab.data.get("downloadId") or grab.download_id or "") or None
+        with self.conn:
+            cur = self.conn.execute(
+                """
+                UPDATE pending_adds
+                SET arr_history_id = ?, arr_media_id = ?, download_id = ?, title = ?,
+                    requested_at = ?, deadline_at = ?, attempt_count = 0,
+                    metadata_activation_attempt = NULL,
+                    status = 'retry_wait', last_checked_at = NULL,
+                    last_status = 'new-radarr-grab', last_error = NULL,
+                    next_retry_at = ?,
+                    notification_attempted_at = NULL, notification_attempt_count = 0,
+                    notification_next_retry_at = NULL, notification_last_error = NULL,
+                    seerr_watchlist_status = NULL, seerr_watchlist_last_error = NULL,
+                    seerr_watchlist_error_fingerprint = NULL,
+                    seerr_watchlist_error_notified_fingerprint = NULL,
+                    seerr_watchlist_warning_notified_at = NULL,
+                    radarr_blocklist_status = NULL, radarr_blocklist_last_error = NULL,
+                    radarr_blocklist_verify_misses = 0,
+                     sonarr_blocklist_status = NULL,
+                     sonarr_blocklist_last_error = NULL,
+                     sonarr_blocklist_verify_misses = 0
+                WHERE hash = ? AND source = ? AND status = 'failed'
+                  AND COALESCE(arr_history_id, 0) < ?
+                """,
+                (
+                    grab.history_id, grab.arr_media_id, download_id, grab.source_title,
+                    now_text, deadline_text, now_text, grab.hash, source, grab.history_id,
+                ),
+            )
+        return cur.rowcount == 1
+
     def requeue_failed(self, source: str) -> int:
         """Explicitly re-arm exhausted, never-confirmed attempts for operator-directed retry."""
         with self.conn:
@@ -698,18 +811,109 @@ class StateDB:
                 """
                 UPDATE pending_adds
                 SET status = 'retry_wait', attempt_count = 0, next_retry_at = ?,
+                    metadata_activation_attempt = NULL,
                     last_error = 'Manually re-queued with --retry-failed',
                     notification_attempted_at = NULL,
                     seerr_watchlist_status = NULL,
                     seerr_watchlist_last_error = NULL,
                     seerr_watchlist_error_fingerprint = NULL,
                     seerr_watchlist_error_notified_fingerprint = NULL,
-                    seerr_watchlist_warning_notified_at = NULL
+                    seerr_watchlist_warning_notified_at = NULL,
+                    radarr_blocklist_status = NULL,
+                    radarr_blocklist_last_error = NULL,
+                    radarr_blocklist_verify_misses = 0,
+                     sonarr_blocklist_status = NULL,
+                     sonarr_blocklist_last_error = NULL,
+                     sonarr_blocklist_verify_misses = 0
                 WHERE source = ? AND status = 'failed'
                 """,
                 (iso_now(), source),
             )
         return cur.rowcount
+
+    def radarr_blocklist_candidates(self, source: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM pending_adds
+            WHERE source = ? AND status = 'failed'
+              AND (radarr_blocklist_status IS NULL
+                   OR radarr_blocklist_status IN ('retry', 'request_started', 'verify_pending'))
+            ORDER BY requested_at
+            """,
+            (source,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_radarr_blocklist_state(
+        self,
+        torrent_hash: str,
+        status: str,
+        *,
+        error: str | None = None,
+        verify_misses: int | None = None,
+    ) -> None:
+        with self.conn:
+            if verify_misses is None:
+                self.conn.execute(
+                    """
+                    UPDATE pending_adds
+                    SET radarr_blocklist_status = ?, radarr_blocklist_last_error = ?
+                    WHERE hash = ?
+                    """,
+                    (status, error[:1000] if error else None, torrent_hash),
+                )
+            else:
+                self.conn.execute(
+                    """
+                    UPDATE pending_adds
+                    SET radarr_blocklist_status = ?, radarr_blocklist_last_error = ?,
+                        radarr_blocklist_verify_misses = ?
+                    WHERE hash = ?
+                    """,
+                    (status, error[:1000] if error else None, verify_misses, torrent_hash),
+                )
+
+    def sonarr_blocklist_candidates(self, source: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM pending_adds
+            WHERE source = ? AND status = 'failed'
+              AND (sonarr_blocklist_status IS NULL
+                   OR sonarr_blocklist_status IN ('retry', 'request_started', 'verify_pending'))
+            ORDER BY requested_at
+            """,
+            (source,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_sonarr_blocklist_state(
+        self,
+        torrent_hash: str,
+        status: str,
+        *,
+        error: str | None = None,
+        verify_misses: int | None = None,
+    ) -> None:
+        with self.conn:
+            if verify_misses is None:
+                self.conn.execute(
+                    """
+                    UPDATE pending_adds
+                    SET sonarr_blocklist_status = ?, sonarr_blocklist_last_error = ?
+                    WHERE hash = ?
+                    """,
+                    (status, error[:1000] if error else None, torrent_hash),
+                )
+            else:
+                self.conn.execute(
+                    """
+                    UPDATE pending_adds
+                    SET sonarr_blocklist_status = ?, sonarr_blocklist_last_error = ?,
+                        sonarr_blocklist_verify_misses = ?
+                    WHERE hash = ?
+                    """,
+                    (status, error[:1000] if error else None, verify_misses, torrent_hash),
+                )
 
     def record_terminal_event(
         self,
@@ -750,46 +954,91 @@ class StateDB:
             SELECT * FROM pending_adds
             WHERE source = ? AND status = 'failed'
               AND notification_attempted_at IS NULL
+              AND (notification_next_retry_at IS NULL OR notification_next_retry_at <= ?)
             ORDER BY requested_at
             """,
-            (source,),
+            (source, iso_now()),
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [
+            {**dict(row), "record_table": "pending_adds", "record_key": str(row["hash"])}
+            for row in rows
+        ]
 
     def unnotified_terminal_events(self, source: str) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             """
             SELECT * FROM terminal_events
             WHERE source = ? AND notification_attempted_at IS NULL
+              AND (notification_next_retry_at IS NULL OR notification_next_retry_at <= ?)
             ORDER BY created_at
             """,
-            (source,),
+            (source, iso_now()),
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [
+            {**dict(row), "record_table": "terminal_events", "record_key": str(row["event_key"])}
+            for row in rows
+        ]
 
-    def mark_pending_notifications_attempted(self, hashes: list[str]) -> None:
-        if not hashes:
+    def mark_notification_delivered(self, records: list[dict[str, Any]]) -> None:
+        if not records:
             return
         now = iso_now()
-        placeholders = ",".join("?" for _ in hashes)
         with self.conn:
-            self.conn.execute(
-                f"UPDATE pending_adds SET notification_attempted_at = ? "
-                f"WHERE hash IN ({placeholders})",
-                [now, *hashes],
-            )
+            for record in records:
+                table = str(record.get("record_table") or "")
+                if table == "pending_adds":
+                    key_column = "hash"
+                elif table == "terminal_events":
+                    key_column = "event_key"
+                else:
+                    raise ValueError("Unknown terminal-notification record table")
+                self.conn.execute(
+                    f"""
+                    UPDATE {table}
+                    SET notification_attempted_at = ?,
+                        notification_next_retry_at = NULL,
+                        notification_last_error = NULL
+                    WHERE {key_column} = ? AND source = ?
+                    """,
+                    (now, str(record.get("record_key") or ""), str(record.get("source") or "")),
+                )
 
-    def mark_terminal_events_attempted(self, event_keys: list[str]) -> None:
-        if not event_keys:
-            return
-        now = iso_now()
-        placeholders = ",".join("?" for _ in event_keys)
+    def schedule_notification_retry(self, records: list[dict[str, Any]], error: str) -> int:
+        """Durably re-queue undelivered terminal notifications using bounded exponential backoff."""
+        longest_delay = 0
+        now = datetime.now(timezone.utc)
         with self.conn:
-            self.conn.execute(
-                f"UPDATE terminal_events SET notification_attempted_at = ? "
-                f"WHERE event_key IN ({placeholders})",
-                [now, *event_keys],
-            )
+            for record in records:
+                table = str(record.get("record_table") or "")
+                if table == "pending_adds":
+                    key_column = "hash"
+                elif table == "terminal_events":
+                    key_column = "event_key"
+                else:
+                    raise ValueError("Unknown terminal-notification record table")
+                key = str(record.get("record_key") or "")
+                source = str(record.get("source") or "")
+                row = self.conn.execute(
+                    f"SELECT notification_attempt_count FROM {table} WHERE {key_column} = ? AND source = ?",
+                    (key, source),
+                ).fetchone()
+                if row is None:
+                    continue
+                attempt = int(row["notification_attempt_count"] or 0) + 1
+                delay = notification_delivery_retry_delay(attempt)
+                retry_at = (now + timedelta(seconds=delay)).isoformat()
+                self.conn.execute(
+                    f"""
+                    UPDATE {table}
+                    SET notification_attempt_count = ?,
+                        notification_next_retry_at = ?,
+                        notification_last_error = ?
+                    WHERE {key_column} = ? AND source = ? AND notification_attempted_at IS NULL
+                    """,
+                    (attempt, retry_at, safe_notification_text(error, 100), key, source),
+                )
+                longest_delay = max(longest_delay, delay)
+        return longest_delay
 
     def notification_fingerprint(self, state_key: str) -> str | None:
         row = self.conn.execute(
@@ -1076,6 +1325,330 @@ def _seerr_watchlist_success(
     )
 
 
+def process_radarr_blocklist(cfg: Config, arr: HttpClient, db: StateDB) -> None:
+    """Use Radarr's native failed-history action to blocklist terminally failed grabs."""
+    if cfg.arr_type != "radarr":
+        return
+    if not cfg.radarr_blocklist_enabled:
+        logging.info("RADARR_BLOCKLIST_SKIPPED source=%s reason=disabled", cfg.name)
+        return
+
+    def title_key(value: Any) -> str:
+        return " ".join(str(value or "").split()).casefold()
+
+    for row in db.radarr_blocklist_candidates(cfg.name):
+        torrent_hash = str(row.get("hash") or "").strip().lower()
+        media_id = as_int(row.get("arr_media_id"))
+        history_id = as_int(row.get("arr_history_id"))
+        release_title = str(row.get("title") or "").strip()
+        media_title = safe_notification_text(
+            row.get("media_title") or row.get("title") or "Unknown", 160
+        )
+        safe_release_title = safe_notification_text(release_title or "Unknown", 200)
+        current_status = str(row.get("radarr_blocklist_status") or "")
+        attempt_count = int(row.get("attempt_count") or 0)
+
+        # A definitive terminal status can occur before the configured retry limit
+        # (for example, a permanent API rejection). Only an ambiguous request already
+        # in flight is verified regardless of count; do not blocklist a fresh item early.
+        if current_status not in {"request_started", "verify_pending"} and attempt_count < cfg.max_add_attempts:
+            reason = (
+                f"attempt count {attempt_count}/{cfg.max_add_attempts}; "
+                "configured attempt limit has not been exhausted"
+            )
+            db.set_radarr_blocklist_state(
+                torrent_hash, "skipped_attempt_limit", error=reason, verify_misses=0
+            )
+            logging.warning(
+                "RADARR_BLOCKLIST_SKIPPED source=%s media_id=%s history_id=%s title=%r release=%r attempts=%d/%d reason=attempt-limit-not-exhausted",
+                cfg.name, media_id or "missing", history_id or "missing",
+                media_title, safe_release_title, attempt_count, cfg.max_add_attempts,
+            )
+            continue
+
+        if not torrent_hash or not media_id or not history_id or not release_title:
+            reason = "required Radarr history/media/release identity is missing"
+            db.set_radarr_blocklist_state(torrent_hash, "failed", error=reason)
+            logging.error(
+                "RADARR_BLOCKLIST_FAILED source=%s media_id=%s history_id=%s title=%r release=%r reason=%s",
+                cfg.name, media_id or "missing", history_id or "missing",
+                media_title, safe_release_title, reason,
+            )
+            continue
+
+        # Once a non-idempotent failed-history request may have been sent, never resend
+        # it blindly. Radarr's BlocklistResource does not expose the torrent infohash,
+        # so recovery can only compare the exact source title for that movie.
+        if current_status in {"request_started", "verify_pending"}:
+            url = normalize_url(cfg.arr_url, "/api/v3/blocklist/movie") + "?" + urlencode(
+                {"movieId": media_id}
+            )
+            try:
+                response = arr.request_json(
+                    "GET", url, api_key=True,
+                    retry_count=cfg.retry_count, retry_delay=cfg.retry_delay,
+                )
+                if not isinstance(response, list):
+                    raise ImporterError("Radarr movie blocklist response is not an array")
+                found = any(
+                    isinstance(item, dict)
+                    and title_key(item.get("sourceTitle")) == title_key(release_title)
+                    for item in response
+                )
+            except Exception as exc:
+                safe_error = safe_notification_text(str(exc), 500)
+                db.set_radarr_blocklist_state(
+                    torrent_hash, "verify_pending", error=safe_error
+                )
+                logging.warning(
+                    "RADARR_BLOCKLIST_VERIFY_PENDING source=%s media_id=%s history_id=%s title=%r release=%r reason=lookup-error error=%s",
+                    cfg.name, media_id, history_id, media_title, safe_release_title, safe_error,
+                )
+                continue
+
+            if found:
+                db.set_radarr_blocklist_state(
+                    torrent_hash, "already_present", error=None, verify_misses=0
+                )
+                logging.info(
+                    "RADARR_BLOCKLIST_ALREADY_PRESENT source=%s media_id=%s history_id=%s title=%r release=%r evidence=source-title-match_after_ambiguous_request",
+                    cfg.name, media_id, history_id, media_title, safe_release_title,
+                )
+                continue
+
+            misses = int(row.get("radarr_blocklist_verify_misses") or 0) + 1
+            if misses >= 3:
+                error = (
+                    "Radarr accepted no verifiable blocklist evidence after three checks; "
+                    "the request result was ambiguous, and it was not resent to avoid duplicate side effects"
+                )
+                db.set_radarr_blocklist_state(
+                    torrent_hash, "failed", error=error, verify_misses=misses
+                )
+                logging.error(
+                    "RADARR_BLOCKLIST_FAILED source=%s media_id=%s history_id=%s title=%r release=%r verify_misses=%d error=%s",
+                    cfg.name, media_id, history_id, media_title, safe_release_title, misses, error,
+                )
+            else:
+                db.set_radarr_blocklist_state(
+                    torrent_hash, "verify_pending", error=row.get("radarr_blocklist_last_error"),
+                    verify_misses=misses,
+                )
+                logging.warning(
+                    "RADARR_BLOCKLIST_VERIFY_PENDING source=%s media_id=%s history_id=%s title=%r release=%r verify_misses=%d/3",
+                    cfg.name, media_id, history_id, media_title, safe_release_title, misses,
+                )
+            continue
+
+        # Persist the intent before the side effect. If the process dies after the
+        # HTTP request, the next run performs a read-only verification instead of
+        # sending a second failed-history event that could trigger another search.
+        db.set_radarr_blocklist_state(torrent_hash, "request_started", error=None, verify_misses=0)
+        url = normalize_url(cfg.arr_url, f"/api/v3/history/failed/{history_id}")
+        try:
+            arr.request_json("POST", url, api_key=True, retry_count=0)
+        except HttpStatusError as exc:
+            safe_error = safe_notification_text(str(exc), 500)
+            if is_retryable_http(exc.code):
+                db.set_radarr_blocklist_state(
+                    torrent_hash, "verify_pending", error=safe_error, verify_misses=0
+                )
+                logging.warning(
+                    "RADARR_BLOCKLIST_VERIFY_PENDING source=%s media_id=%s history_id=%s title=%r release=%r http_status=%s error=%s",
+                    cfg.name, media_id, history_id, media_title, safe_release_title, exc.code, safe_error,
+                )
+            else:
+                db.set_radarr_blocklist_state(torrent_hash, "failed", error=safe_error)
+                logging.error(
+                    "RADARR_BLOCKLIST_FAILED source=%s media_id=%s history_id=%s title=%r release=%r http_status=%s error=%s",
+                    cfg.name, media_id, history_id, media_title, safe_release_title, exc.code, safe_error,
+                )
+            continue
+        except Exception as exc:
+            safe_error = safe_notification_text(str(exc), 500)
+            db.set_radarr_blocklist_state(
+                torrent_hash, "verify_pending", error=safe_error, verify_misses=0
+            )
+            logging.warning(
+                "RADARR_BLOCKLIST_VERIFY_PENDING source=%s media_id=%s history_id=%s title=%r release=%r error=%s",
+                cfg.name, media_id, history_id, media_title, safe_release_title, safe_error,
+            )
+            continue
+
+        # Radarr handles the failed-history event synchronously and returns only after
+        # the native failure/blocklist path has run. No unsupported /blocklist POST is used.
+        db.set_radarr_blocklist_state(torrent_hash, "blocked", error=None, verify_misses=0)
+        logging.info(
+            "RADARR_BLOCKLIST_BLOCKED source=%s media_id=%s history_id=%s title=%r release=%r",
+            cfg.name, media_id, history_id, media_title, safe_release_title,
+        )
+
+
+def process_sonarr_blocklist(cfg: Config, arr: HttpClient, db: StateDB) -> None:
+    """Use Sonarr's native failed-history action to blocklist terminally failed grabs."""
+    if cfg.arr_type != "sonarr":
+        return
+    if not cfg.sonarr_blocklist_enabled:
+        logging.info("SONARR_BLOCKLIST_SKIPPED source=%s reason=disabled", cfg.name)
+        return
+
+    def title_key(value: Any) -> str:
+        return " ".join(str(value or "").split()).casefold()
+
+    for row in db.sonarr_blocklist_candidates(cfg.name):
+        torrent_hash = str(row.get("hash") or "").strip().lower()
+        media_id = as_int(row.get("arr_media_id"))
+        history_id = as_int(row.get("arr_history_id"))
+        release_title = str(row.get("title") or "").strip()
+        media_title = safe_notification_text(
+            row.get("media_title") or row.get("title") or "Unknown", 160
+        )
+        safe_release_title = safe_notification_text(release_title or "Unknown", 200)
+        current_status = str(row.get("sonarr_blocklist_status") or "")
+        attempt_count = int(row.get("attempt_count") or 0)
+
+        # A definitive terminal status can occur before the configured retry limit
+        # (for example, a permanent API rejection). Only an ambiguous request already
+        # in flight is verified regardless of count; do not blocklist a fresh item early.
+        if current_status not in {"request_started", "verify_pending"} and attempt_count < cfg.max_add_attempts:
+            reason = (
+                f"attempt count {attempt_count}/{cfg.max_add_attempts}; "
+                "configured attempt limit has not been exhausted"
+            )
+            db.set_sonarr_blocklist_state(
+                torrent_hash, "skipped_attempt_limit", error=reason, verify_misses=0
+            )
+            logging.warning(
+                "SONARR_BLOCKLIST_SKIPPED source=%s media_id=%s history_id=%s title=%r release=%r attempts=%d/%d reason=attempt-limit-not-exhausted",
+                cfg.name, media_id or "missing", history_id or "missing",
+                media_title, safe_release_title, attempt_count, cfg.max_add_attempts,
+            )
+            continue
+
+        if not torrent_hash or not media_id or not history_id or not release_title:
+            reason = "required Sonarr history/media/release identity is missing"
+            db.set_sonarr_blocklist_state(torrent_hash, "failed", error=reason)
+            logging.error(
+                "SONARR_BLOCKLIST_FAILED source=%s media_id=%s history_id=%s title=%r release=%r reason=%s",
+                cfg.name, media_id or "missing", history_id or "missing",
+                media_title, safe_release_title, reason,
+            )
+            continue
+
+        # Once a non-idempotent failed-history request may have been sent, never resend
+        # it blindly. Sonarr's BlocklistResource does not expose the torrent infohash,
+        # so recovery can only compare the exact source title for that series.
+        if current_status in {"request_started", "verify_pending"}:
+            url = normalize_url(cfg.arr_url, "/api/v3/blocklist") + "?" + urlencode(
+                {"seriesIds": media_id, "page": 1, "pageSize": 1000}
+            )
+            try:
+                response = arr.request_json(
+                    "GET", url, api_key=True,
+                    retry_count=cfg.retry_count, retry_delay=cfg.retry_delay,
+                )
+                # Sonarr exposes a paged resource with the matching entries in "records".
+                # Accept a bare list as a defensive compatibility path for older builds.
+                if isinstance(response, dict) and isinstance(response.get("records"), list):
+                    records = response["records"]
+                elif isinstance(response, list):
+                    records = response
+                else:
+                    raise ImporterError("Sonarr blocklist response does not contain a records array")
+                found = any(
+                    isinstance(item, dict)
+                    and title_key(item.get("sourceTitle")) == title_key(release_title)
+                    for item in records
+                )
+            except Exception as exc:
+                safe_error = safe_notification_text(str(exc), 500)
+                db.set_sonarr_blocklist_state(
+                    torrent_hash, "verify_pending", error=safe_error
+                )
+                logging.warning(
+                    "SONARR_BLOCKLIST_VERIFY_PENDING source=%s media_id=%s history_id=%s title=%r release=%r reason=lookup-error error=%s",
+                    cfg.name, media_id, history_id, media_title, safe_release_title, safe_error,
+                )
+                continue
+
+            if found:
+                db.set_sonarr_blocklist_state(
+                    torrent_hash, "already_present", error=None, verify_misses=0
+                )
+                logging.info(
+                    "SONARR_BLOCKLIST_ALREADY_PRESENT source=%s media_id=%s history_id=%s title=%r release=%r evidence=source-title-match_after_ambiguous_request",
+                    cfg.name, media_id, history_id, media_title, safe_release_title,
+                )
+                continue
+
+            misses = int(row.get("sonarr_blocklist_verify_misses") or 0) + 1
+            if misses >= 3:
+                error = (
+                    "Sonarr accepted no verifiable blocklist evidence after three checks; "
+                    "the request result was ambiguous, and it was not resent to avoid duplicate side effects"
+                )
+                db.set_sonarr_blocklist_state(
+                    torrent_hash, "failed", error=error, verify_misses=misses
+                )
+                logging.error(
+                    "SONARR_BLOCKLIST_FAILED source=%s media_id=%s history_id=%s title=%r release=%r verify_misses=%d error=%s",
+                    cfg.name, media_id, history_id, media_title, safe_release_title, misses, error,
+                )
+            else:
+                db.set_sonarr_blocklist_state(
+                    torrent_hash, "verify_pending", error=row.get("sonarr_blocklist_last_error"),
+                    verify_misses=misses,
+                )
+                logging.warning(
+                    "SONARR_BLOCKLIST_VERIFY_PENDING source=%s media_id=%s history_id=%s title=%r release=%r verify_misses=%d/3",
+                    cfg.name, media_id, history_id, media_title, safe_release_title, misses,
+                )
+            continue
+
+        # Persist the intent before the side effect. If the process dies after the
+        # HTTP request, the next run performs a read-only verification instead of
+        # sending a second failed-history event that could trigger another search.
+        db.set_sonarr_blocklist_state(torrent_hash, "request_started", error=None, verify_misses=0)
+        url = normalize_url(cfg.arr_url, f"/api/v3/history/failed/{history_id}")
+        try:
+            arr.request_json("POST", url, api_key=True, retry_count=0)
+        except HttpStatusError as exc:
+            safe_error = safe_notification_text(str(exc), 500)
+            if is_retryable_http(exc.code):
+                db.set_sonarr_blocklist_state(
+                    torrent_hash, "verify_pending", error=safe_error, verify_misses=0
+                )
+                logging.warning(
+                    "SONARR_BLOCKLIST_VERIFY_PENDING source=%s media_id=%s history_id=%s title=%r release=%r http_status=%s error=%s",
+                    cfg.name, media_id, history_id, media_title, safe_release_title, exc.code, safe_error,
+                )
+            else:
+                db.set_sonarr_blocklist_state(torrent_hash, "failed", error=safe_error)
+                logging.error(
+                    "SONARR_BLOCKLIST_FAILED source=%s media_id=%s history_id=%s title=%r release=%r http_status=%s error=%s",
+                    cfg.name, media_id, history_id, media_title, safe_release_title, exc.code, safe_error,
+                )
+            continue
+        except Exception as exc:
+            safe_error = safe_notification_text(str(exc), 500)
+            db.set_sonarr_blocklist_state(
+                torrent_hash, "verify_pending", error=safe_error, verify_misses=0
+            )
+            logging.warning(
+                "SONARR_BLOCKLIST_VERIFY_PENDING source=%s media_id=%s history_id=%s title=%r release=%r error=%s",
+                cfg.name, media_id, history_id, media_title, safe_release_title, safe_error,
+            )
+            continue
+
+        # Sonarr handles the failed-history event synchronously and returns only after
+        # its native failed-download/blocklist path has run. No unsupported POST is used.
+        db.set_sonarr_blocklist_state(torrent_hash, "blocked", error=None, verify_misses=0)
+        logging.info(
+            "SONARR_BLOCKLIST_BLOCKED source=%s media_id=%s history_id=%s title=%r release=%r",
+            cfg.name, media_id, history_id, media_title, safe_release_title,
+        )
+
+
 def process_seerr_watchlist(cfg: Config, db: StateDB) -> None:
     """Mirror terminal TorrServer failures into the administrator's Seerr Watchlist."""
     if not cfg.seerr_watchlist_enabled:
@@ -1142,206 +1715,203 @@ def process_seerr_watchlist(cfg: Config, db: StateDB) -> None:
         "SEERR_WATCHLIST_SUMMARY source=%s candidates=%d requests=%d added=%d already_present=%d errors=%d",
         cfg.name, len(records), considered, added, already_present, errors,
     )
-    dispatch_seerr_watchlist_notifications(cfg, db)
 
 
-def _seerr_watchlist_lines(records: list[dict[str, Any]], cfg: Config, *, errors: bool = False) -> list[str]:
-    grouped: dict[tuple[str, int | None], dict[str, Any]] = {}
-    for record in records:
-        tmdb_id = as_int(record.get("tmdb_id"))
-        key = (cfg.category, tmdb_id)
-        item = grouped.setdefault(key, {"titles": [], "releases": [], "statuses": [], "errors": []})
-        title = str(record.get("media_title") or record.get("release_title") or "Неизвестный элемент")
-        if title not in item["titles"]:
-            item["titles"].append(title)
-        release = str(record.get("release_title") or "")
-        if release and release not in item["releases"]:
-            item["releases"].append(release)
-        item["statuses"].append(str(record.get("seerr_watchlist_status") or ""))
-        error = str(record.get("seerr_watchlist_last_error") or "")
-        if error and error not in item["errors"]:
-            item["errors"].append(error)
-
-    lines: list[str] = []
-    media_label = "Сериал" if cfg.category == "tv" else "Фильм"
-    for (_media_type, tmdb_id), item in grouped.items():
-        title = safe_notification_text(item["titles"][0], 150)
-        suffix = f" (TMDb {tmdb_id})" if tmdb_id else ""
-        if errors:
-            reason = safe_notification_text(item["errors"][0] if item["errors"] else "неизвестная ошибка", 220)
-            lines.append(f"• {media_label}: {title}{suffix} — не удалось зарегистрировать в Watchlist Seerr: {reason}")
-        else:
-            states = set(item["statuses"])
-            where = "уже находился" if states == {"already_present"} else "добавлен или уже находился"
-            releases = "; ".join(safe_notification_text(v, 100) for v in item["releases"][:2])
-            extra = f"; раздача: {releases}" if releases else ""
-            lines.append(f"• {media_label}: {title}{suffix} — {where} в Watchlist администратора Seerr{extra}")
-    return lines
+def notification_delivery_retry_delay(attempt: int) -> int:
+    # Retry delivery independently from torrent adds. The systemd timer may make
+    # actual retries less frequent; state survives restarts and an Apprise outage.
+    delays = (60, 300, 900, 1800, 3600)
+    return delays[min(max(1, int(attempt)) - 1, len(delays) - 1)]
 
 
-def _chunk_notification_lines(intro: str, lines: list[str], limit: int = 3000) -> list[str]:
-    chunks: list[str] = []
-    current: list[str] = []
-    for line in lines:
-        candidate = intro + "\n\n" + "\n".join(current + [line])
-        if current and len(candidate) > limit:
-            chunks.append(intro + "\n\n" + "\n".join(current))
-            current = [line]
-        else:
-            current.append(line)
-    if current:
-        chunks.append(intro + "\n\n" + "\n".join(current))
-    return chunks
+def human_failure_reason(value: Any) -> str:
+    raw = str(value or "").strip()
+    lowered = raw.lower()
+    http = re.search(r"\bHTTP\s+(\d{3})\b", raw, flags=re.IGNORECASE)
+    code = int(http.group(1)) if http else None
+
+    if code == 410 and ("download url" in lowered or "resolving" in lowered):
+        return "ссылка на выбранную раздачу больше недоступна (HTTP 410); запрос добавления в TorrServer не выполнялся"
+    if code in {401, 403}:
+        return f"сервис отклонил запрос из-за авторизации (HTTP {code})"
+    if code == 404 and ("download" in lowered or "url" in lowered):
+        return "ссылка на выбранную раздачу не найдена (HTTP 404)"
+    if "verification deadline expired" in lowered:
+        if "absent-from-list" in lowered:
+            return "TorrServer не подтвердил появление раздачи в своём списке за отведённое время"
+        return "TorrServer не подтвердил готовность раздачи за отведённое время"
+    if "connection refused" in lowered:
+        return "не удалось подключиться к TorrServer: соединение отклонено"
+    if "timed out" in lowered or "timeout" in lowered:
+        if "download url" in lowered or "resolve" in lowered:
+            return "истекло время ожидания при получении ссылки на раздачу"
+        return "истекло время ожидания ответа от TorrServer"
+    if "name or service not known" in lowered or "temporary failure in name resolution" in lowered:
+        return "не удалось определить адрес одного из сервисов"
+    if code is not None:
+        return f"сервис вернул HTTP {code}"
+    return safe_notification_text(raw, 180)
 
 
-def dispatch_seerr_watchlist_notifications(cfg: Config, db: StateDB) -> None:
-    if not cfg.notifications_enabled:
-        return
-    warning_rows = db.seerr_watchlist_warning_rows(cfg.name)
-    if warning_rows:
-        intro = (
-            "Передача этих медиа на TorrServer завершилась окончательной ошибкой. "
-            "Элементы зарегистрированы (или уже находились) в Watchlist администратора Seerr для контроля и разбирательства. "
-            "Наличие в Watchlist не означает, что медиа уже доступно для просмотра."
-        )
-        for index, body in enumerate(_chunk_notification_lines(
-            intro, _seerr_watchlist_lines(warning_rows, cfg)
-        ), start=1):
-            suffix = f" ({index})" if len(warning_rows) > 1 else ""
-            apprise_notify(
-                cfg, f"{cfg.service_name} — Сбой TorrServer зарегистрирован в Seerr{suffix}",
-                body, "warning", cfg.notification_tag_warning,
-            )
-        db.mark_seerr_watchlist_warnings_notified(warning_rows)
-
-    error_rows = db.seerr_watchlist_error_rows(cfg.name)
-    if error_rows:
-        intro = (
-            "arr2torr не смог зарегистрировать окончательный сбой TorrServer в Watchlist Seerr. "
-            "Элемент требует проверки конфигурации, идентификатора или доступности Seerr."
-        )
-        for index, body in enumerate(_chunk_notification_lines(
-            intro, _seerr_watchlist_lines(error_rows, cfg, errors=True)
-        ), start=1):
-            suffix = f" ({index})" if len(error_rows) > 1 else ""
-            apprise_notify(
-                cfg, f"{cfg.service_name} — Ошибка регистрации в Seerr{suffix}",
-                body, "failure", cfg.notification_tag_critical,
-            )
-        db.mark_seerr_watchlist_errors_notified(error_rows)
-
-
-def retry_warning_fingerprint(rows: list[dict[str, Any]]) -> tuple[str, str]:
-    if not rows:
-        return "", ""
-    attempts: dict[int, int] = {}
-    for row in rows:
-        count = int(row.get("attempt_count") or 0)
-        attempts[count] = attempts.get(count, 0) + 1
-    fingerprint = json.dumps(
-        {"count": len(rows), "attempts": sorted(attempts.items())},
-        separators=(",", ":"),
-    )
-    attempt_summary = ", ".join(
-        f"{number} попытка: {count}" for number, count in sorted(attempts.items())
-    )
-    return fingerprint, attempt_summary
+def human_seerr_error(value: Any) -> str:
+    raw = str(value or "").strip()
+    lowered = raw.lower()
+    http = re.search(r"\bHTTP\s+(\d{3})\b", raw, flags=re.IGNORECASE)
+    code = int(http.group(1)) if http else None
+    if code in {401, 403}:
+        return f"Seerr отклонил авторизацию (HTTP {code})"
+    if code is not None and code >= 500:
+        return f"Seerr временно недоступен (HTTP {code}); arr2torr повторит регистрацию"
+    if "timeout" in lowered or "timed out" in lowered or "urlerror" in lowered:
+        return "Seerr не ответил; arr2torr повторит регистрацию"
+    return safe_notification_text(raw, 160)
 
 
 def terminal_notification_block(cfg: Config, row: dict[str, Any], *, preparation: bool = False) -> str:
     media_title = safe_notification_text(
-        row.get("media_title") or row.get("title") or row.get("release_title") or "Неизвестный элемент",
-        180,
+        row.get("media_title") or row.get("title") or row.get("release_title") or "Неизвестное медиа",
+        160,
     )
-    release_title = safe_notification_text(row.get("release_title") or row.get("title") or "", 220)
-    lines = [f"{'Фильм' if cfg.category == 'movie' else 'Сериал'}: {media_title}"]
+    release_title = safe_notification_text(row.get("release_title") or row.get("title") or "", 200)
+    media_label = "Фильм" if cfg.category == "movie" else "Сериал"
+    lines = [f"{media_label}: {media_title}"]
     if release_title and release_title != media_title:
-        lines.append(f"Релиз: {release_title}")
-    if preparation:
-        lines.append("Этап: подготовка ссылки (до обращения к TorrServer)")
-    else:
+        lines.append(f"Выбранная раздача: {release_title}")
+
+    lines.append("Не удалось добавить выбранную раздачу в TorrServer.")
+    reason = row.get("reason") if preparation else (row.get("reason") or row.get("last_error"))
+    lines.append(f"Причина: {human_failure_reason(reason)}")
+
+    if not preparation:
         attempts = int(row.get("attempt_count") or 0)
-        reason = str(row.get("last_error") or row.get("reason") or "")
-        if permanent_preparation_error(ImporterError(reason)):
-            lines.append(f"Попытки выполнены: {attempts}; повтор прекращён из-за постоянной ошибки")
+        lines.append(f"Автоматические попытки закончились ({attempts} из {cfg.max_add_attempts}).")
+
+    arr_label = "Radarr" if cfg.arr_type == "radarr" else "Sonarr"
+    lines.append(f"Советуем выбрать другую раздачу в {arr_label} и нажать Grab.")
+
+    if cfg.seerr_watchlist_enabled:
+        status = str(row.get("seerr_watchlist_status") or "")
+        if status == "added":
+            lines.append(f"{media_label} добавлен в Watchlist администратора Seerr." if cfg.category == "movie" else "Сериал добавлен в Watchlist администратора Seerr.")
+        elif status == "already_present":
+            lines.append(f"{media_label} уже есть в Watchlist администратора Seerr." if cfg.category == "movie" else "Сериал уже есть в Watchlist администратора Seerr.")
+        elif status == "missing_tmdb_id":
+            lines.append(f"Не удалось добавить {media_label.lower()} в Watchlist Seerr: в данных нет TMDb ID.")
+        elif status == "error":
+            seerr_error = human_seerr_error(row.get("seerr_watchlist_last_error"))
+            lines.append(f"Не удалось добавить {media_label.lower()} в Watchlist Seerr: {seerr_error}.")
         else:
-            lines.append(f"Попытки добавления/проверки: {attempts}/{cfg.max_add_attempts}")
-        lines.append("Этап: добавление или подтверждение в TorrServer")
-    reason_text = safe_notification_text(row.get("reason") or row.get("last_error") or "", 180)
-    lines.append(f"Причина: {reason_text}")
+            lines.append(f"Не удалось проверить статус {media_label.lower()} в Watchlist Seerr; arr2torr попробует снова.")
+
     link = arr_card_url(cfg, row.get("title_slug"))
     if link:
-        lines.append(f"Карточка Arr: {link}")
+        lines.append(f"Карточка в {arr_label}: {link}")
+    # The configured blocklist result is deliberately the final item in the alert.
+    blocklist_label = "Radarr" if cfg.arr_type == "radarr" else "Sonarr"
+    blocklist_enabled = (
+        cfg.radarr_blocklist_enabled if cfg.arr_type == "radarr"
+        else cfg.sonarr_blocklist_enabled
+    )
+    state_prefix = "radarr" if cfg.arr_type == "radarr" else "sonarr"
+    blocklist_status = str(row.get(f"{state_prefix}_blocklist_status") or "")
+    if not preparation and blocklist_enabled:
+        blocklist_error = safe_notification_text(
+            row.get(f"{state_prefix}_blocklist_last_error") or "", 120
+        )
+        if blocklist_status == "blocked":
+            if cfg.arr_type == "radarr":
+                lines.append("Блок-лист Radarr: релиз добавлен; Radarr сможет исключить эту раздачу при дальнейшем поиске.")
+            else:
+                lines.append("Блок-лист Sonarr: команда принята; Sonarr сможет исключить эту раздачу при дальнейшем поиске.")
+        elif blocklist_status == "already_present":
+            lines.append(f"Блок-лист {blocklist_label}: запись с таким названием релиза уже найдена; точный infohash через API подтвердить нельзя.")
+        elif blocklist_status in {"request_started", "verify_pending", "retry"}:
+            lines.append(f"Блок-лист {blocklist_label}: команда отправлена или её результат пока не подтверждён; импортёр проверяет результат и не отправляет повторную команду автоматически.")
+            if blocklist_error:
+                lines.append(f"Проверка блок-листа: {blocklist_error}")
+        elif blocklist_status == "failed":
+            lines.append(f"Блок-лист {blocklist_label}: не удалось подтвердить блокировку этой раздачи.")
+            if blocklist_error:
+                lines.append(f"Причина блокировки: {blocklist_error}")
+        elif blocklist_status == "legacy_skipped":
+            lines.append(f"Блок-лист {blocklist_label}: эта ошибка относится к периоду до обновления; автоматическая блокировка задним числом не выполнялась.")
+        elif blocklist_status == "skipped_attempt_limit":
+            lines.append(f"Блок-лист {blocklist_label}: блокировка не выполнялась, поскольку зарегистрировано меньше попыток, чем настроенный лимит; условие исчерпания попыток не выполнено.")
     return "\n".join(lines)
 
 
-def chunk_terminal_blocks(cfg: Config, blocks: list[str], limit: int = 3300) -> list[str]:
-    intro = (
-        f"Инстанс: {cfg.name}. Терминальных ошибок в этой сводке: {len(blocks)}.\n"
-        f"Подробности журнала: journalctl -u torr-arr-importer@{cfg.name}.service -n 100 --no-pager"
-    )
-    chunks: list[str] = []
-    current: list[str] = []
-    for block in blocks:
-        candidate = intro + "\n\n" + "\n\n".join(current + [block])
+def chunk_terminal_records(
+    cfg: Config, records: list[dict[str, Any]], limit: int = 3250
+) -> list[list[dict[str, Any]]]:
+    """Split a large terminal batch into the fewest messages that fit the Telegram-size budget."""
+    service = safe_notification_text(cfg.service_name or cfg.name, 140)
+    intro = f"{service}\nОкончательные ошибки передачи в TorrServer: {len(records)}."
+    chunks: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for record in records:
+        candidate_rows = current + [record]
+        candidate = intro + "\n\n" + "\n\n".join(
+            terminal_notification_block(cfg, item, preparation=item.get("record_table") == "terminal_events")
+            for item in candidate_rows
+        )
         if current and len(candidate) > limit:
-            chunks.append(intro + "\n\n" + "\n\n".join(current))
-            current = [block]
+            chunks.append(current)
+            current = [record]
         else:
-            current.append(block)
+            current.append(record)
     if current:
-        chunks.append(intro + "\n\n" + "\n\n".join(current))
+        chunks.append(current)
     return chunks
 
 
+def terminal_notification_body(
+    cfg: Config, records: list[dict[str, Any]], total_count: int, part: int, parts: int
+) -> str:
+    service = safe_notification_text(cfg.service_name or cfg.name, 140)
+    lines = [service, f"Окончательные ошибки передачи в TorrServer: {total_count}."]
+    if parts > 1:
+        lines.append(f"Часть {part} из {parts}.")
+    lines.extend(
+        terminal_notification_block(cfg, row, preparation=row.get("record_table") == "terminal_events")
+        for row in records
+    )
+    return "\n\n".join(lines)
+
+
 def dispatch_notifications(cfg: Config, db: StateDB) -> None:
-    # Retry warnings contain counts only; their fingerprint deliberately excludes item identity.
-    retry_rows = [
-        row for row in db.pending_rows(source=cfg.name)
-        if row.get("status") == "retry_wait"
+    # Interim retry states stay in the journal. Telegram is reserved for terminal,
+    # actionable failures, one grouped critical message per batch.
+    records = [
+        *db.unnotified_terminal_failures(cfg.name),
+        *db.unnotified_terminal_events(cfg.name),
     ]
-    fingerprint, attempt_summary = retry_warning_fingerprint(retry_rows)
-    state_key = f"{cfg.name}:retry_wait"
-    previous = db.notification_fingerprint(state_key)
-    if fingerprint and fingerprint != previous and cfg.notifications_enabled:
-        distribution = f" Распределение попыток: {attempt_summary}." if attempt_summary else ""
-        body = (
-            f"Инстанс {cfg.name}: {len(retry_rows)} проблемных раздач ожидают повторной попытки."
-            f"{distribution} Названия и идентификаторы элементов не включены; подробности находятся в локальном журнале."
-        )
-        apprise_notify(
-            cfg, f"{cfg.service_name} — Проблемы передачи (ожидается повтор)",
-            body, "warning", cfg.notification_tag_warning,
-        )
-    # Update after every enabled run even when delivery fails. While disabled, keep
-    # an empty baseline so enabling notifications later can report an ongoing issue.
-    db.set_notification_fingerprint(state_key, fingerprint if cfg.notifications_enabled else "")
-
-    failed_rows = db.unnotified_terminal_failures(cfg.name)
-    terminal_events = db.unnotified_terminal_events(cfg.name)
-    if not failed_rows and not terminal_events:
+    if not records:
         return
-
-    blocks = [terminal_notification_block(cfg, row) for row in failed_rows]
-    blocks.extend(terminal_notification_block(cfg, row, preparation=True) for row in terminal_events)
-    chunks = chunk_terminal_blocks(cfg, blocks)
-    if cfg.notifications_enabled:
-        for index, body in enumerate(chunks, start=1):
-            suffix = f" ({index}/{len(chunks)})" if len(chunks) > 1 else ""
-            apprise_notify(
-                cfg, f"{cfg.service_name} — Ошибка передачи релиза{suffix}",
-                body, "failure", cfg.notification_tag_critical,
-            )
-        # Mark after at most one delivery attempt, including HTTP failure; do not
-        # retry terminal messages indefinitely. Disabled notifications are not an
-        # attempt: leave new events pending so turning notifications on can deliver them.
-        db.mark_pending_notifications_attempted([str(row["hash"]) for row in failed_rows])
-        db.mark_terminal_events_attempted([str(row["event_key"]) for row in terminal_events])
-    else:
+    if not cfg.notifications_enabled:
         logging.info(
             "APPRISE_SKIPPED source=%s reason=notifications-disabled terminal_items=%d",
-            cfg.name, len(blocks),
+            cfg.name, len(records),
         )
+        return
+
+    chunks = chunk_terminal_records(cfg, records)
+    for index, chunk in enumerate(chunks, start=1):
+        body = terminal_notification_body(cfg, chunk, len(records), index, len(chunks))
+        suffix = f" (часть {index}/{len(chunks)})" if len(chunks) > 1 else ""
+        noun = "раздачу" if len(records) == 1 else "выбранные раздачи"
+        title = f"{cfg.service_name} — Не удалось добавить {noun} в TorrServer{suffix}"
+        if apprise_notify(cfg, title, body, "failure", cfg.notification_tag_critical):
+            db.mark_notification_delivered(chunk)
+            logging.info(
+                "APPRISE_TERMINAL_DELIVERED source=%s items=%d part=%d/%d",
+                cfg.name, len(chunk), index, len(chunks),
+            )
+        else:
+            delay = db.schedule_notification_retry(chunk, "apprise_delivery_failed")
+            logging.warning(
+                "APPRISE_TERMINAL_RETRY_QUEUED source=%s items=%d part=%d/%d retry_in_sec=%d",
+                cfg.name, len(chunk), index, len(chunks), delay,
+            )
 
 
 def as_int(value: Any) -> int | None:
@@ -1444,6 +2014,33 @@ def extract_ts_hashes(records: Iterable[dict[str, Any]]) -> set[str]:
     return result
 
 
+def fetch_torrserver_item(cfg: Config, ts: HttpClient, torrent_hash: str) -> dict[str, Any]:
+    """Read the live torrent object without submitting another add request."""
+    url = normalize_url(cfg.torrserver_url, "/torrents")
+    response = ts.request_json(
+        "POST", url, payload={"action": "get", "hash": torrent_hash},
+        retry_count=cfg.retry_count, retry_delay=cfg.retry_delay,
+    )
+    if not isinstance(response, dict):
+        raise ImporterError("TorrServer get response is not an object")
+    response_hash = str(response.get("hash") or "").strip().lower()
+    if response_hash != torrent_hash:
+        raise ImporterError(
+            f"TorrServer get returned hash={response_hash or 'missing'}, expected {torrent_hash}"
+        )
+    return response
+
+
+def torrserver_status(record: dict[str, Any] | None) -> str:
+    if not isinstance(record, dict):
+        return "absent-from-list"
+    return str(record.get("stat_string") or record.get("statString") or "unknown").strip()
+
+
+def is_db_only_record(record: dict[str, Any] | None) -> bool:
+    return torrserver_status(record).casefold() == "torrent in db"
+
+
 def parse_iso_datetime(value: Any) -> datetime | None:
     if not value:
         return None
@@ -1456,26 +2053,49 @@ def parse_iso_datetime(value: Any) -> datetime | None:
     return parsed
 
 
-def verification_evidence(record: dict[str, Any] | None) -> str | None:
-    """Return observable evidence that an exact hash is ready or persisted."""
+def file_stats_problem(record: dict[str, Any] | None) -> str | None:
+    """Explain why a TorrServer record does not contain a usable file structure."""
     if not isinstance(record, dict):
-        return None
+        return "record-missing"
+    stats = None
+    for key in ("file_stats", "FileStats", "fileStats"):
+        if key in record:
+            stats = record.get(key)
+            break
+    if not isinstance(stats, list) or not stats:
+        return "file-stats-missing-or-empty"
 
-    status_text = str(record.get("stat_string") or record.get("statString") or "").strip().lower()
-    status_num = as_int(record.get("stat"))
-    file_stats = record.get("file_stats") or record.get("FileStats") or record.get("files")
-    if isinstance(file_stats, list):
-        for item in file_stats:
-            if not isinstance(item, dict):
-                continue
-            path = str(item.get("path") or item.get("Path") or "").strip()
-            file_id = as_int(item.get("id", item.get("Id")))
-            if path and file_id is not None and file_id > 0:
-                return "file-stats"
-    if status_num == 3 or "torrent working" in status_text:
-        return "working-status"
-    if status_num == 5 or "torrent in db" in status_text:
-        return "database-presence"
+    seen_ids: set[int] = set()
+    seen_paths: set[str] = set()
+    for index, entry in enumerate(stats, start=1):
+        if not isinstance(entry, dict):
+            return f"file-stats-entry-{index}-not-an-object"
+        file_id = as_int(entry.get("id", entry.get("ID")))
+        if file_id is None or file_id <= 0:
+            return f"file-stats-entry-{index}-invalid-id"
+        if file_id in seen_ids:
+            return f"file-stats-entry-{index}-duplicate-id"
+        seen_ids.add(file_id)
+
+        raw_path = entry.get("path", entry.get("Path"))
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return f"file-stats-entry-{index}-invalid-path"
+        if "\x00" in raw_path or "\\" in raw_path or re.match(r"^[A-Za-z]:", raw_path):
+            return f"file-stats-entry-{index}-unsafe-path"
+        path = PurePosixPath(raw_path)
+        if path.is_absolute() or not path.parts or ".." in path.parts:
+            return f"file-stats-entry-{index}-unsafe-path"
+        normalized_path = str(path)
+        if normalized_path in seen_paths:
+            return f"file-stats-entry-{index}-duplicate-path"
+        seen_paths.add(normalized_path)
+    return None
+
+
+def verification_evidence(record: dict[str, Any] | None) -> str | None:
+    """Accept success only after a non-empty, safe TorrServer FileStats structure is available."""
+    if file_stats_problem(record) is None:
+        return "usable-file-stats"
     return None
 
 
@@ -1613,15 +2233,26 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
             requeued = db.requeue_failed(cfg.name)
             logging.warning("RETRY_FAILED source=%s requeued=%d", cfg.name, requeued)
 
-        # Reconcile every unverified attempt against the current list before candidate
-        # selection. If a previously failed hash is present but not ready, resume
-        # observation instead of adding its magnet again.
+        # Reconcile persisted state against successful-import history and the FileStats contract.
+        # Hash presence alone is intermediate; previously imported hashes remain protected from
+        # automatic resurrection when they have intentionally been removed from TorrServer.
+        grabs_by_hash = {grab.hash.lower(): grab for grab in grabs if grab.hash}
+        media_cache: dict[int, dict[str, Any]] = {}
         if not dry_run:
             for pending in db.pending_rows(source=cfg.name):
                 status = str(pending.get("status") or "")
                 if status not in {"pending", "retry_wait", "failed"}:
                     continue
                 h = str(pending.get("hash") or "").lower()
+
+                if h in imported_hashes:
+                    db.confirm_pending(h)
+                    logging.info(
+                        "PENDING_CLEARED source=%s hash=%s reason=already-in-import-history",
+                        cfg.name, h,
+                    )
+                    continue
+
                 record = ts_by_hash.get(h)
                 evidence = verification_evidence(record)
                 if evidence:
@@ -1635,14 +2266,105 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                         )
                     continue
 
-                if h in ts_hashes and status in {"retry_wait", "failed"}:
-                    observed = str(record.get("stat_string") or record.get("statString") or "present-not-ready")
-                    db.resume_verification(h, cfg.verification_timeout_sec, observed)
-                    logging.info(
-                        "VERIFY_RESUMED source=%s hash=%s stat=%s reason=present-without-readiness",
-                        cfg.name, h, observed,
-                    )
-                    continue
+                # If a persisted DB-only entry is not active, re-add only to activate its metadata.
+                # Never issue even this activation request after the verification deadline expired.
+                # A live object is inspected via action=get; it is never blindly added again.
+                current_deadline = pending_deadline(pending)
+                verification_window_open = (
+                    current_deadline is None or datetime.now(timezone.utc) < current_deadline
+                )
+                if status == "pending" and record is not None and verification_window_open:
+                    attempt_count = int(pending.get("attempt_count") or 0)
+                    if is_db_only_record(record):
+                        current_grab = grabs_by_hash.get(h)
+                        if (
+                            current_grab is not None
+                            and db.metadata_activation_attempt(h) != attempt_count
+                            and db.mark_metadata_activation_attempt(h, attempt_count)
+                        ):
+                            try:
+                                media = media_cache.get(current_grab.arr_media_id) if current_grab.arr_media_id else None
+                                if media is None:
+                                    media = fetch_media(cfg, arr, current_grab)
+                                    if current_grab.arr_media_id:
+                                        media_cache[current_grab.arr_media_id] = media
+                                if not current_grab.download_url:
+                                    raise ImporterError(f"hash={h} has no downloadUrl for DB-only metadata activation")
+                                resolved_link = (
+                                    ts.resolve_link(current_grab.download_url)
+                                    if cfg.resolve_download_url else current_grab.download_url
+                                )
+                                response = add_to_torrserver(
+                                    cfg, ts, current_grab, media, resolved_link=resolved_link,
+                                )
+                                response_status = str(
+                                    response.get("stat_string") or response.get("statString") or "accepted"
+                                )
+                                submitted += 1
+                                db.observe_pending(h, "metadata-activation-accepted: " + response_status)
+                                logging.info(
+                                    "METADATA_ACTIVATION_ACCEPTED source=%s hash=%s attempt=%d stat=%s",
+                                    cfg.name, h, attempt_count, response_status,
+                                )
+                            except Exception as exc:
+                                db.observe_pending(h, "metadata-activation-failed", str(exc))
+                                logging.warning(
+                                    "METADATA_ACTIVATION_FAILED source=%s hash=%s attempt=%d error=%s",
+                                    cfg.name, h, attempt_count, exc,
+                                )
+                    else:
+                        try:
+                            details = fetch_torrserver_item(cfg, ts, h)
+                            detail_evidence = verification_evidence(details)
+                            if detail_evidence:
+                                completed = db.confirm_pending(h)
+                                if completed is not None:
+                                    imported_hashes.add(h)
+                                    added += 1
+                                    logging.info(
+                                        "ADDED source=%s hash=%s verification=%s recovery=action-get",
+                                        cfg.name, h, detail_evidence,
+                                    )
+                                continue
+                            db.observe_pending(
+                                h, "action-get-incomplete: " + torrserver_status(details)
+                                + "; " + str(file_stats_problem(details)),
+                            )
+                        except HttpStatusError as exc:
+                            db.observe_pending(
+                                h, "action-get-not-found" if exc.code == 404 else "action-get-failed", str(exc),
+                            )
+                            logging.warning(
+                                "METADATA_RECOVERY_GET_FAILED source=%s hash=%s http_status=%s error=%s",
+                                cfg.name, h, exc.code, exc,
+                            )
+                        except Exception as exc:
+                            db.observe_pending(h, "action-get-failed", str(exc))
+                            logging.warning(
+                                "METADATA_RECOVERY_GET_FAILED source=%s hash=%s error=%s",
+                                cfg.name, h, exc,
+                            )
+
+                # A later Radarr Grab of the same infohash represents a new operator-selected
+                # attempt. Do not let a terminal row from the older Grab block it forever.
+                if status == "failed":
+                    current_grab = grabs_by_hash.get(h)
+                    old_history_id = as_int(pending.get("arr_history_id")) or 0
+                    new_history_id = as_int(current_grab.history_id) if current_grab else None
+                    if (
+                        current_grab is not None
+                        and old_history_id > 0
+                        and new_history_id is not None
+                        and new_history_id > old_history_id
+                        and db.rearm_failed_for_new_grab(
+                            current_grab, cfg.name, cfg.verification_timeout_sec,
+                        )
+                    ):
+                        logging.warning(
+                            "REARMED_NEW_GRAB source=%s hash=%s previous_history_id=%d current_history_id=%d reason=new-radarr-grab",
+                            cfg.name, h, old_history_id, new_history_id,
+                        )
+                        continue
 
                 if status == "pending":
                     deadline = pending_deadline(pending)
@@ -1665,7 +2387,9 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
         candidates: list[Grab] = []
         retry_candidates: set[str] = set()
         for grab in grabs:
-            if grab.hash in ts_hashes:
+            record = ts_by_hash.get(grab.hash)
+            evidence = verification_evidence(record)
+            if evidence:
                 continue
             if not rebuild and grab.hash in imported_hashes:
                 continue
@@ -1677,17 +2401,25 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                 # Any non-due, in-flight, other-source, or exhausted attempt blocks
                 # another add. This also prevents cross-instance duplicate requests.
                 continue
+            # Missing hashes may be added. Present-but-incomplete hashes are observed or
+            # explicitly reactivated only when the snapshot says the object is DB-only.
             candidates.append(grab)
 
-        logging.info(
-            "SNAPSHOT source=%s arr_grabbed=%d torrserver=%d import_history_known=%d pending=%d candidates=%d mode=%s",
-            cfg.name, history_count, len(ts_hashes), known_count, len(pending_map), len(candidates),
-            "rebuild" if rebuild else "normal",
+        skipped_present = sum(1 for grab in grabs if verification_evidence(ts_by_hash.get(grab.hash)))
+        present_incomplete = sum(
+            1 for grab in grabs
+            if grab.hash in ts_by_hash and not verification_evidence(ts_by_hash.get(grab.hash))
         )
-
-        skipped_present = sum(1 for grab in grabs if grab.hash in ts_hashes)
-        skipped_known = sum(1 for grab in grabs if grab.hash not in ts_hashes and not rebuild and grab.hash in imported_hashes)
-        media_cache: dict[int, dict[str, Any]] = {}
+        skipped_known = sum(
+            1 for grab in grabs
+            if not verification_evidence(ts_by_hash.get(grab.hash))
+            and not rebuild and grab.hash in imported_hashes
+        )
+        logging.info(
+            "SNAPSHOT source=%s arr_grabbed=%d torrserver=%d import_history_known=%d pending=%d candidates=%d present_incomplete=%d mode=%s",
+            cfg.name, history_count, len(ts_hashes), known_count, len(pending_map), len(candidates),
+            present_incomplete, "rebuild" if rebuild else "normal",
+        )
 
         if dry_run:
             for grab in candidates:
@@ -1717,17 +2449,21 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
         # one shared polling loop below verifies the whole batch without serial waits.
         for grab in candidates:
             media = media_cache.get(grab.arr_media_id) if grab.arr_media_id else None
+            record = ts_by_hash.get(grab.hash)
+            needs_add = record is None or is_db_only_record(record)
             try:
                 if media is None:
                     media = fetch_media(cfg, arr, grab)
                     if grab.arr_media_id:
                         media_cache[grab.arr_media_id] = media
-                if not grab.download_url:
-                    raise ImporterError(f"hash={grab.hash} has no downloadUrl")
-                resolved_link = (
-                    ts.resolve_link(grab.download_url)
-                    if cfg.resolve_download_url else grab.download_url
-                )
+                resolved_link = None
+                if needs_add:
+                    if not grab.download_url:
+                        raise ImporterError(f"hash={grab.hash} has no downloadUrl")
+                    resolved_link = (
+                        ts.resolve_link(grab.download_url)
+                        if cfg.resolve_download_url else grab.download_url
+                    )
             except Exception as exc:
                 failed += 1
                 logging.error(
@@ -1766,20 +2502,70 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                     cfg.name, grab.hash,
                 )
                 continue
+            record = ts_by_hash.get(grab.hash)
+            is_metadata_activation = is_db_only_record(record)
             logging.info(
-                "ADD source=%s hash=%s title=%r imdb=%s tmdb=%s reason=%s attempt=%d",
+                "%s source=%s hash=%s title=%r imdb=%s tmdb=%s reason=%s attempt=%d",
+                "METADATA_ACTIVATION" if is_metadata_activation else "ADD",
                 cfg.name, grab.hash, grab.source_title, media.get("imdbId") or "",
                 media.get("tmdbId") or "", reason, attempt,
             )
+            if record is not None and not is_metadata_activation:
+                # A live object already exists. Inspect it, but never submit a duplicate add.
+                try:
+                    details = fetch_torrserver_item(cfg, ts, grab.hash)
+                    detail_evidence = verification_evidence(details)
+                    if detail_evidence:
+                        completed = db.confirm_pending(grab.hash)
+                        if completed is not None:
+                            imported_hashes.add(grab.hash)
+                            added += 1
+                            logging.info(
+                                "ADDED source=%s hash=%s verification=%s recovery=action-get",
+                                cfg.name, grab.hash, detail_evidence,
+                            )
+                        continue
+                    db.observe_pending(
+                        grab.hash, "action-get-incomplete: " + torrserver_status(details)
+                        + "; " + str(file_stats_problem(details)),
+                    )
+                except HttpStatusError as exc:
+                    db.observe_pending(
+                        grab.hash, "action-get-not-found" if exc.code == 404 else "action-get-failed", str(exc),
+                    )
+                    logging.warning(
+                        "METADATA_RECOVERY_GET_FAILED source=%s hash=%s http_status=%s error=%s",
+                        cfg.name, grab.hash, exc.code, exc,
+                    )
+                except Exception as exc:
+                    db.observe_pending(grab.hash, "action-get-failed", str(exc))
+                    logging.warning(
+                        "METADATA_RECOVERY_GET_FAILED source=%s hash=%s error=%s",
+                        cfg.name, grab.hash, exc,
+                    )
+                continue
+
+            if is_metadata_activation and not db.mark_metadata_activation_attempt(grab.hash, attempt):
+                logging.info(
+                    "METADATA_ACTIVATION_SKIPPED source=%s hash=%s attempt=%d reason=already-requested",
+                    cfg.name, grab.hash, attempt,
+                )
+                continue
+
             try:
                 response = add_to_torrserver(
                     cfg, ts, grab, media, resolved_link=resolved_link,
                 )
                 response_status = str(response.get("stat_string") or response.get("statString") or "accepted")
-                db.observe_pending(grab.hash, "request-accepted: " + response_status)
+                event_status = (
+                    "metadata-activation-accepted: " + response_status
+                    if is_metadata_activation else "request-accepted: " + response_status
+                )
+                db.observe_pending(grab.hash, event_status)
                 submitted += 1
                 logging.info(
-                    "ADD_ACCEPTED source=%s hash=%s stat=%s attempt=%d",
+                    "%s source=%s hash=%s stat=%s attempt=%d",
+                    "METADATA_ACTIVATION_ACCEPTED" if is_metadata_activation else "ADD_ACCEPTED",
                     cfg.name, grab.hash, response_status, attempt,
                 )
             except HttpStatusError as exc:
@@ -1848,10 +2634,9 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                         )
                     continue
 
-                status_text = (
-                    str(record.get("stat_string") or record.get("statString") or "present-not-ready")
-                    if record else "absent-from-list"
-                )
+                status_text = torrserver_status(record)
+                if record is not None:
+                    status_text += "; " + str(file_stats_problem(record))
                 deadline = pending_deadline(pending)
                 if deadline is not None and now >= deadline:
                     detail = poll_error or f"verification deadline expired; last observed status={status_text}"
@@ -1888,15 +2673,17 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                 sleep_for = min(sleep_for, max(0.1, min(remaining)))
             time.sleep(sleep_for)
 
-        dispatch_notifications(cfg, db)
+        process_radarr_blocklist(cfg, arr, db)
+        process_sonarr_blocklist(cfg, arr, db)
         if cfg.seerr_watchlist_enabled:
             process_seerr_watchlist(cfg, db)
+        dispatch_notifications(cfg, db)
         pending_count = len(db.pending_rows())
         logging.info(
             "DONE source=%s candidates=%d submitted=%d added=%d failed=%d pending=%d "
-            "skipped_present=%d skipped_known=%d duration=%.2fs",
+            "skipped_present=%d present_incomplete=%d skipped_known=%d duration=%.2fs",
             cfg.name, len(candidates), submitted, added, failed, pending_count,
-            skipped_present, skipped_known, time.monotonic() - started,
+            skipped_present, present_incomplete, skipped_known, time.monotonic() - started,
         )
         return 0 if failed == 0 else 1
     finally:
@@ -1927,7 +2714,7 @@ def config_from_file(path: str) -> Config:
         state_db=str(raw.get("state_db", "/var/lib/torr-arr-importer/state.db")),
         history_page_size=int(raw.get("history_page_size", DEFAULT_PAGE_SIZE)),
         timeout=int(raw.get("timeout", DEFAULT_TIMEOUT)),
-        user_agent=str(raw.get("user_agent", "torr-arr-importer/1.3.1")),
+        user_agent=str(raw.get("user_agent", "torr-arr-importer/1.3.5")),
         log_level=str(raw.get("log_level", "INFO")).upper(),
         log_file=str(raw.get("log_file", "")),
         retry_count=int(raw.get("retry_count", 2)),
@@ -1938,6 +2725,8 @@ def config_from_file(path: str) -> Config:
         verification_poll_interval_sec=float(raw.get("verification_poll_interval_sec", 3.0)),
         retry_backoff_sec=int(raw.get("retry_backoff_sec", 60)),
         max_add_attempts=int(raw.get("max_add_attempts", 3)),
+        radarr_blocklist_enabled=bool(raw.get("radarr_blocklist_enabled", True)),
+        sonarr_blocklist_enabled=bool(raw.get("sonarr_blocklist_enabled", True)),
         arr_ui_url=str(raw.get("arr_ui_url", "")),
         notifications_enabled=bool(raw.get("notifications_enabled", False)),
         apprise_url=str(raw.get("apprise_url", "")),

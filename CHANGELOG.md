@@ -1,9 +1,68 @@
+# Changelog
+
+## torr-arr-importer v1.3.5 — deployed and live-validated (2026-10-29)
+
+- Add explicit `sonarr_blocklist_enabled = true` to both Sonarr example TOMLs and parse the setting independently of Radarr's existing flag.
+- After a Sonarr release reaches terminal TorrServer add/verification failure and exhausts `max_add_attempts`, use Sonarr's native `POST /api/v3/history/failed/{historyId}` route. Preserve bounded TorrServer retries and exclude pre-add preparation errors.
+- Persist Sonarr blocklist state in dedicated SQLite columns, migrated in place; mark pre-upgrade failed Sonarr rows as `legacy_skipped`, and avoid resending a non-idempotent failed-history request after ambiguous outcomes.
+- Verify an ambiguous Sonarr action using `GET /api/v3/blocklist?seriesIds=...` and source-title matching; the public API does not prove an exact infohash match.
+- Add regression tests for enabled/disabled config, native endpoint use, separate state, paged blocklist parsing, ambiguous-response recovery and terminal notification wording.
+- **CI:** GitHub Actions [run #139](https://github.com/evgendman/arr2torr/actions/runs/40844001781) passed on Python 3.11 and 3.12 with 56 unit tests per version, compilation and version check (`1.3.5`).
+- **Runtime identity:** `/opt/torr-arr-importer/importer.py --version` returned `1.3.5` on MINI-Ubuntu. The installed file matches the source file's Git blob SHA (`712d6f4a276602250a25c52c5f5ccf6b0af92667`).
+- **Radarr live validation:** seven terminally failed release choices reached the native failed-history action and logged `RADARR_BLOCKLIST_BLOCKED`; three grouped critical Apprise notifications were acknowledged with HTTP 200. Five alternative releases passed `FileStats` verification.
+- **Sonarr live validation:** five terminally failed series-release choices logged `SONARR_BLOCKLIST_BLOCKED`. Replacement additions for Outer Banks S01, Outer Banks S03 and Dark S03 then passed `FileStats` verification. No replacement additions for Love, Death & Robots S02/S03 were observed in the reviewed log window; that is a replacement-search/result observation, not a failure of the blocklist action.
+- **Publication status:** runtime and blocklist behavior are validated; PR #4 remains open, and no v1.3.5 Git tag or GitHub Release has been published.
+
+## torr-arr-importer v1.3.4 — strict FileStats verification base (superseded by v1.3.5)
+
+- Configuration convention: explicitly set `radarr_blocklist_enabled = true` in each active Radarr TOML. The code fallback to `true` when the key is absent remains only for backward compatibility; the setting is visible in both Radarr example configs. Sonarr configs do not use this Radarr-only setting.
+
+- Require a usable, non-empty TorrServer `FileStats` list for the exact infohash before confirming a successful import. Validate positive unique file IDs and unique safe relative paths.
+- Treat the add response and `action=list` hash membership as intermediate signals only; `Torrent added`, `Torrent getting info`, `Torrent working` and `Torrent in db` are not sufficient success evidence by themselves.
+- Inspect present-but-incomplete live torrents via `action=get` without blindly resending `action=add`. For DB-only records, allow bounded metadata activation no more than once per verification attempt, then continue polling for usable `FileStats`.
+- Keep absent-hash retries separate from present-but-incomplete metadata recovery. Add a SQLite marker for metadata activation and migrate it in place; do not reset existing import history or deployment state.
+- Add regression coverage for malformed/missing `FileStats`, delayed readiness, DB-only activation, live incomplete hashes, absent-versus-present retry handling, and `action=get` HTTP 404 behavior.
+- GitHub Actions [run #117](https://github.com/evgendman/arr2torr/actions/runs/40833440612) passed on Python 3.11 and 3.12 (49 unit tests, compile step and version check; reported version `1.3.4`). The code and tests are unchanged from the source pin installed on MINI-Ubuntu.
+- **Live verification on MINI-Ubuntu (2026-10-29):** the installed program reports `1.3.4`; SHA-256 `cb10e78ab5f9e94d36af5cb77622ad86601a505bb1410f85bbe458d3dd82c3f4` matches source commit `78ba4801e5e1fc3cfdc4cb620e2e55853e61573c`. Twenty new/replacement additions were observed reaching `ADDED verification=usable-file-stats`.
+- Seven terminally failed release choices reached Radarr's native failed-history action and logged `RADARR_BLOCKLIST_BLOCKED`: *Leaves of Grass*, *Keeping the Faith*, *The French Dispatch*, *Motherless Brooklyn*, *Isle of Dogs*, and two *Sausage Party* releases. Three grouped critical Apprise sends were acknowledged with HTTP 200, for batches of two, four and one item. Five alternate releases subsequently passed `FileStats` verification; the *Sausage Party* HDRip 480p alternative also exhausted three attempts and was blocklisted, but no working replacement had appeared by the 13:05:54 run.
+- The existing SQLite history was retained. The 32 historical rows accepted by v1.3.3's weaker list-only criterion have not been automatically reclassified.
+- Superseded by v1.3.5 on 2026-10-29; current runtime identity and live validation are recorded in the top changelog entry.
+
+## torr-arr-importer v1.3.3 (installed from PR #4 branch for controlled live validation; PR remains open)
+
+- Treat exact infohash membership in TorrServer's list as successful addition; remove the readiness-metadata requirement while retaining the requirement for a post-add list observation.
+- Remove stale pending_adds rows when the same hash is already in the successful imports history, without re-adding a hash that is absent from TorrServer after a deliberate removal.
+- Re-arm an exhausted failed row only when Radarr presents a strictly newer Grab history ID for the same hash; reset attempt, notification, Seerr and blocklist state for that new Grab.
+- Add regression tests for list-presence confirmation, stale pending cleanup, and re-grabbing a terminally failed hash.
+- Install the v1.3.3 code-only update on MINI-Ubuntu without changing TOML configuration, SQLite state or systemd units.
+- Live log review for the 10-hour window ending 2026-10-29 09:45 (+05:00): 115 completed Radarr runs, 79/79 add requests confirmed by subsequent list membership, and zero failed additions or importer ERROR/exception events.
+- The zero-seed Viking Quest 720p release appeared in TorrServer's list on the first attempt. This did not trigger retries or Radarr blocklisting; the live terminal-failure/blocklist path remains live-validation work.
+
+## torr-arr-importer v1.3.2 (combined candidate)
+
+### Radarr terminal-failure blocklisting
+
+- Enable Radarr blocklisting by default (opt-out with radarr_blocklist_enabled = false) only after an add/verification attempt has reached terminal failure after the configured retry limit.
+- Use Radarr's supported POST /api/v3/history/failed/{historyId} endpoint so Radarr's native failure pipeline records the Grabbed release in its blocklist.
+- Keep Sonarr behavior and pre-add preparation failures unchanged. Preserve bounded TorrServer retries and do not issue duplicate failed-history requests after an ambiguous response.
+- Add an in-place SQLite state migration, explicitly skip pre-upgrade terminal failures to avoid retroactive mass blocklisting, and reset the state when --retry-failed re-arms an item.
+- Append the blocklist outcome to the existing grouped terminal Apprise failure message and add structured logs without introducing a separate notification.
+
+### Terminal-only notifications and durable delivery
+
+- Suppress user-facing messages during retry-wait states. Notify only when add/verification reaches terminal failure or a permanent preparation error prevents the add.
+- Send one aggregated critical/failure message with media/release titles, a plain-language cause, attempts used or permanent-failure context, a recommendation to choose another release, the Arr card link when available, the Seerr Watchlist result, and the Radarr blocklist outcome where applicable.
+- Remove separate retry-warning and Seerr Watchlist notifications so one transfer failure is not announced through multiple topics.
+- Translate common causes into concise Russian text while retaining technical detail in local logs.
+- Persist notification delivery attempts, last error and next retry time in SQLite. Mark terminal items notified only after an Apprise 2xx response; retry failed deliveries with a persisted backoff capped at one hour.
+- Keep delivery retries independent from TorrServer add attempts and import status. Network/notification failures do not change transfer success/failure semantics.
+- Keep distinct terminal-error rows separate when TMDb IDs are missing and test grouping, message aggregation, silent retry states and retry after Apprise failure.
+- SQLite changes are additive and migrate in place. This combined behavior is installed in the v1.3.3 test candidate; the real terminal-failure-to-Radarr-blocklist path remains live-validation work.
+
 ## torr-arr-importer v1.3.1
 
 - Fix a startup race when Radarr and Sonarr initialize the shared SQLite database concurrently. Schema migrations now acquire a write reservation before inspecting and altering table schemas.
 - Add a concurrent-initializer regression test for in-place migration of an existing v1.2 database. No state database reset or data deletion is required.
-
-# Changelog
 
 ## torr-arr-importer v1.3.0
 

@@ -20,6 +20,7 @@ verification_timeout_sec = 120
 verification_poll_interval_sec = 3.0
 retry_backoff_sec = 60
 max_add_attempts = 3
+radarr_blocklist_enabled = true # Block terminally failed TorrServer releases through Radarr's native failed-history path.
 
 # Apprise notifications are opt-in; no requests are made while disabled.
 arr_ui_url = "" # Optional browser base URL for a clickable Arr card in final alerts.
@@ -29,7 +30,7 @@ apprise_config_key = "arr-stack"
 service_name = "arr2torr / Radarr 4K"
 notification_timeout_sec = 5
 notification_tag_critical = "critical"
-notification_tag_warning = "warnings"
+notification_tag_warning = "warnings" # Legacy compatibility setting; current alerts use only critical.
 
 # Seerr Watchlist integration: disabled until a real API key is entered.
 seerr_watchlist_enabled = false

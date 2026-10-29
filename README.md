@@ -4,7 +4,7 @@
 
 arr2torr is the project and documentation home for **torr-arr-importer**, a polling service that transfers releases selected with **Grab** in Radarr or Sonarr directly to the TorrServer API. It is intended for a media workflow where the user wants to start streaming from TorrServer, then expose those streams to a media library through STRM files or another integration.
 
-The current implementation described here is **torr-arr-importer v1.3.1**.
+**torr-arr-importer v1.3.5 is deployed and live-validated on MINI-Ubuntu (2026-10-29).** GitHub Actions [run #139](https://github.com/evgendman/arr2torr/actions/runs/40844001781) passed on Python 3.11 and 3.12 with 56 tests per version, compilation and version check. Both Radarr and Sonarr terminal-failure blocklisting have now been exercised in live logs; see [Roadmap](ROADMAP.md) for observed results and remaining unrelated checks.
 
 ## Why this exists
 
@@ -60,10 +60,11 @@ With the usual five-minute timer, a successfully grabbed release is normally tra
 - Resolves the Arr history data.downloadUrl. In the tested Prowlarr setup, this URL redirects to the original magnet link.
 - Adds the torrent through TorrServer's /torrents API, including the Arr title, media category and a safe subset of Arr metadata in data.
 - Uses one shared SQLite database across all importer instances for verified imports and restart-safe pending attempts.
-- Treats the TorrServer add response as an acknowledgement, then checks observable readiness or explicit database-presence evidence before recording success.
+- Treats the initial add response and exact-hash membership in `action=list` as intermediate signals; success requires usable `FileStats` for that hash.
 - Submits candidates first and verifies the batch with one polling loop and per-hash deadlines rather than serially waiting for each add.
 - Retries unverified attempts with bounded exponential backoff and avoids resending hashes that are still pending on TorrServer.
 - Supports non-mutating --dry-run, deliberate --rebuild, and explicit --retry-failed for exhausted unverified attempts.
+- For Radarr and Sonarr, can send terminal TorrServer add/verification failures to the respective native failed-download handling and blocklist once max_add_attempts is exhausted; independently configurable per instance.
 - Uses separate per-instance configuration and lock files, while sharing the import-history database.
 - Redacts API-key-like URL parameters from logs and exceptions.
 
@@ -71,19 +72,37 @@ With the usual five-minute timer, a successfully grabbed release is normally tra
 
 TorrServer may acknowledge an add request before its background metadata acquisition completes. An expected hash in the initial response is therefore not treated as final success.
 
-The importer persists a pending attempt before the add request, submits eligible releases first, then polls the TorrServer list at a configurable interval. Every pending hash has its own deadline. Usable FileStats, a working status, or TorrServer's explicit database-presence status is used as observable verification evidence. The successful-import table is updated only after this evidence is observed.
+The importer persists a pending attempt before the add request, submits eligible releases first, then polls TorrServer at a configurable interval. Every pending hash has its own deadline. In v1.3.5, the exact hash must expose a non-empty, usable `FileStats` list before it is recorded as a successful import. Entries need positive unique file IDs and unique safe relative paths. If a hash is present but incomplete, the importer inspects the live object with `action=get` rather than blindly sending another add; a DB-only `Torrent in db` record gets a bounded metadata-activation request before polling continues. The immediate response and list membership are not final success.
 
 Pending attempts live in the shared SQLite table pending_adds and do not contain the credential-bearing download URL. After a process restart, they are reconciled against TorrServer before retrying. Failures use bounded exponential backoff and stop automatically after the configured attempt limit; --retry-failed explicitly re-queues exhausted, never-confirmed attempts for the selected Arr instance.
 
-Verification means observable readiness or database presence; it does not claim a durable disk-commit guarantee that TorrServer's API does not expose. Older successful-import records remain protected from automatic resurrection. Use --rebuild only when intentionally repopulating missing historical entries.
+Verification means TorrServer exposes usable `FileStats` for the exact hash. Mere list membership does not confirm file structure or downstream readiness. Older successful-import records that are absent from TorrServer remain protected from automatic resurrection; because v1.3.3 did not store verification provenance, pre-existing success rows are not automatically reclassified. Use `--rebuild` only when deliberately repopulating missing historical entries.
 
 Default verification settings are verification_timeout_sec = 120, verification_poll_interval_sec = 3.0, retry_backoff_sec = 60 (doubling per failed attempt, capped at one hour), and max_add_attempts = 3. Compare the timeout with the TorrentDisconnectTimeout setting of the installed TorrServer build.
 
-## Aggregated Apprise notifications (v1.2.0)
+## Final-failure Apprise notifications (introduced in v1.3.2; retained in v1.3.5)
 
-Notifications are opt-in through the shared Apprise API; the importer does not store Telegram tokens, chat IDs or topic IDs. For eligible instances, numeric-only warnings are sent when the retry-wait count or attempt distribution changes. When an item reaches a terminal failure, the importer groups newly failed items into a critical message containing the movie/series title, release title if available, attempts used, a sanitized reason and an optional direct Arr card link when `arr_ui_url` and Arr's `titleSlug` are available.
+Notifications are opt-in and use the shared Apprise API; arr2torr never stores Telegram tokens, chat IDs or topic IDs. **There are no Telegram messages while an item is still waiting for an automatic add/verification retry.** The importer waits until the failure is terminal (all configured add attempts are exhausted, or a permanent error makes retry impossible).
 
-Notification state is stored in the existing SQLite database to avoid repeating the same warnings or terminal alerts on every timer run. Apprise calls use a bounded timeout, are attempted at most once for a terminal group, and never change the import result. Notifications default to disabled in configuration examples. See [Installation and configuration](docs/INSTALLATION.md) and [Operations](docs/OPERATIONS.md).
+The final message goes to the critical tag and brings the entire action-oriented summary together: movie/series title, selected release, plain-language reason, attempts used, recommendation to choose another release in Radarr/Sonarr, and a direct Arr card link when available. When Seerr Watchlist integration is enabled, the same message reports whether the media was added, was already listed, or could not be registered. There is no second warning or Watchlist message for the same failure.
+
+Terminal notification state is stored in the existing SQLite database and is migrated in place. An unsuccessful Apprise request leaves the message pending and schedules another attempt with increasing delays (1, 5, 15, 30 and then 60 minutes, capped at one hour). A successful 2xx response marks the notification delivered. This is at-least-once delivery: if Apprise accepts a request but its response is lost, a retry can result in a duplicate. Delivery failures never change the TorrServer import result. Notifications remain disabled in example configs by default. See [Installation and configuration](docs/INSTALLATION.md) and [Operations](docs/OPERATIONS.md).
+
+## Automatic Radarr/Sonarr blocklisting after terminal transfer failure (v1.3.5)
+
+Every Radarr example TOML explicitly sets `radarr_blocklist_enabled = true`, and every Sonarr example TOML explicitly sets `sonarr_blocklist_enabled = true`. Keep the matching flag explicit in each active config so the policy is visible without inspecting importer code. Both flags default to `true` for backward compatibility with existing configs; set a flag to `false` only to deliberately disable blocklisting for that instance.
+
+Once a release reaches terminal TorrServer add/verification failure after all configured attempts, arr2torr calls the corresponding Arr application's native `POST /api/v3/history/failed/{historyId}` endpoint for that exact Grab history record. Radarr and Sonarr then use their own failed-download and blocklist pipeline; replacement searching depends on each application's settings.
+
+- Intermediate failures waiting for retry are not blocklisted.
+- Errors before the TorrServer add (such as an expired Grab download URL) are not treated as dead TorrServer releases.
+- Radarr and Sonarr have independent flags and independent persisted state. Sonarr's flag is `sonarr_blocklist_enabled`; Radarr's is `radarr_blocklist_enabled`.
+- State is saved in separate Radarr/Sonarr SQLite columns and migrated in place. Existing terminal failures are marked as pre-upgrade during the corresponding migration and are not sent to the Arr application retroactively.
+- Outcomes are appended to the existing grouped terminal Apprise message and recorded in logs (`RADARR_BLOCKLIST_*` or `SONARR_BLOCKLIST_*`). There is no separate blocklist-only notification.
+- If a failed-history request has an ambiguous HTTP/network result, the importer does not repeat the non-idempotent POST blindly. It checks the matching Arr blocklist on later runs and compares the release source title. Neither public blocklist resource exposes enough information to prove an exact infohash match in this recovery path.
+- **Radarr:** seven terminally failed release choices reached `RADARR_BLOCKLIST_BLOCKED`; three grouped critical Apprise notifications were acknowledged with HTTP 200, and five replacement releases were verified.
+- **Sonarr:** five terminally failed series-release choices reached `SONARR_BLOCKLIST_BLOCKED`; replacement releases for Outer Banks S01, Outer Banks S03 and Dark S03 then reached `ADDED verification=usable-file-stats`. No alternative addition for Love, Death & Robots S02/S03 was observed in the reviewed log window. This does not negate the confirmed blocklist actions: replacement search and available results depend on Sonarr's own configuration and the releases available to it.
+
 
 ## Seerr Watchlist for terminal transfer failures (v1.3.0)
 
@@ -93,9 +112,9 @@ The optional Seerr integration registers a movie or whole series in the administ
 - Requires `seerr_url` and `seerr_api_key`. API-key requests use Seerr's administrator account (user ID 1) unless an explicit user override is sent; this integration does not send one.
 - Reads terminal `failed` rows from `pending_adds` and permanent `terminal_events` for the current Arr instance. `pending` and `retry_wait` are ignored.
 - Uses only the TMDb ID already stored in arr2torr. Missing IDs are recorded and reported; there is no separate metadata lookup.
-- Success/verified-existing items produce a grouped Apprise `warnings` message explaining that the TorrServer transfer failed and the item is tracked in Seerr for troubleshooting. Failure to register it produces an Apprise `critical` message.
+- The Seerr registration result is included in the same final critical transfer-failure message; there is no separate warnings or Seerr notification. A successful or verified-existing Watchlist entry is described naturally, while registration errors are reported honestly and are retried by the integration where applicable.
 - Watchlist processing state is stored in additional SQLite columns and is migrated in place. The import history and original TorrServer failure state remain intact.
-- The success notification is not an availability notification: a Watchlist item is **not necessarily available to watch**.
+- The Seerr Watchlist is used as an administrator reminder list for failed transfers; it does not create a Seerr media request.
 
 The setting is off in all example configs until a real key is supplied and the operator enables it. Configure only the two active 1080p profiles unless the 4K instances are intentionally brought into use.
 
@@ -185,7 +204,7 @@ The current stored data subset includes source instance name, media type, target
 - [Roadmap and validation status](ROADMAP.md)
 - [Version history](CHANGELOG.md)
 
-The current code package is **torr-arr-importer v1.3.1**. It uses Python 3.11+ and the standard library; it does not require external Python packages.
+The installed and verified runtime is **torr-arr-importer v1.3.5**. It uses Python 3.11+ and the standard library; it does not require external Python packages. The live Radarr and Sonarr terminal-failure blocklist paths are confirmed; GitHub PR #4 remains open and no v1.3.5 tag or GitHub Release has been published yet.
 
 ## Related project: STRM/NFO library generation
 
@@ -193,10 +212,8 @@ The current code package is **torr-arr-importer v1.3.1**. It uses Python 3.11+ a
 
 ## Current status
 
-Version **1.2.0 is installed and live-validated on MINI-Ubuntu** (2026-10-22). Both configured 1080p timer instances—Radarr and Sonarr—completed live runs successfully. New movie and series Grab records were transferred to TorrServer; successful additions were confirmed by post-add verification using observable file metadata, and later ordinary runs skipped hashes already present or previously handled.
+MINI-Ubuntu is running **torr-arr-importer v1.3.5**. The installed `importer.py` file's Git blob SHA (`712d6f4a276602250a25c52c5f5ccf6b0af92667`) matches the corresponding source file on the feature branch byte-for-byte. GitHub Actions [run #139](https://github.com/evgendman/arr2torr/actions/runs/40844001781) passed on Python 3.11 and 3.12 with 56 tests per version, compilation and version check.
 
-The existing v1.2.0 Apprise notification flow was exercised end to end; v1.3.0 adds the opt-in Seerr Watchlist path and requires live API validation after a real Seerr key is configured. Warning messages and a grouped critical message were received in Telegram. For five warning sends and one critical send observed on 2026-10-22, the importer logged `APPRISE_SENT` with HTTP 200, and Apprise logged `Sent Telegram notification`, `Delivered Notification(s)` and HTTP 200. One earlier send at 10:36:52 logged HTTP 424 and a Telegram connection error; the exact relationship to a warning the user reports receiving could not be conclusively matched by timestamp. Subsequent observed sends succeeded.
+Live logs on 2026-10-29 confirmed 20 fresh/replacement additions reaching `ADDED verification=usable-file-stats`. For Radarr, seven terminally failed release choices reached the native failed-history action and logged `RADARR_BLOCKLIST_BLOCKED`; three grouped critical Apprise notifications were acknowledged with HTTP 200, and five replacements were verified. For Sonarr, five failed release choices logged `SONARR_BLOCKLIST_BLOCKED`; replacement additions for Outer Banks S01, Outer Banks S03 and Dark S03 were verified. No alternative additions for Love, Death & Robots S02/S03 were observed in the reviewed log window, but the native blocklist actions themselves are confirmed. The blocklist implementation/validation milestone is complete for both applications; replacement availability remains dependent on each app's own settings and available releases.
 
-Not every torrent is guaranteed to become ready. During live Sonarr tests, one release remained absent from TorrServer's list after the 120-second verification deadline on repeated attempts and stayed in bounded retry state. The importer surfaced this through warning messages instead of falsely marking the release imported. The notification delivery path worked for those warnings. A terminal failure path was also exercised with Radarr, and its critical notification arrived.
-
-The importer remains conservative: TorrServer membership and shared SQLite history are compared on each run, only verified additions enter successful import history, failures are logged and normal operation does not override a deliberate removal decision. Only the Radarr/Sonarr 1080p timers were validated as enabled and active; this status does not imply that either 4K timer is enabled.
+Remaining unrelated checks are to confirm one `FileStats`-verified release through downstream `torr2strm`, reassess 32 historical success rows created under v1.3.3 without resetting SQLite or resurrecting intentionally removed hashes, and recheck that the active Radarr config explicitly states `radarr_blocklist_enabled = true`. GitHub PR #4 remains open; no v1.3.5 tag or GitHub Release has been published yet.

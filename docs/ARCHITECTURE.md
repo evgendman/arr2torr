@@ -1,6 +1,6 @@
 # Architecture and state model
 
-This document describes the current **torr-arr-importer v1.2.0** behavior and data mapping. The existing TorrServer metadata payload retains the core field subset introduced in v1.0.3; v1.1.0 added asynchronous add verification and bounded retries, and v1.2.0 adds aggregated Apprise notifications.
+This document describes the v1.3.5 code candidate and its state model. MINI-Ubuntu remains on v1.3.4; v1.3.5 is not installed or tagged. The candidate preserves usable-`FileStats` verification and adds independently configured Radarr/Sonarr native blocklisting with separate in-place SQLite state. Radarr has been live-validated, while Sonarr blocklisting still requires CI and host-specific live validation.
 
 ## 1. Source of truth
 
@@ -68,20 +68,16 @@ The source and receiver snapshots are independent: Arr history tells us what was
 Let:
 
 - **A** = unique infohashes with usable Grabbed records in the configured Arr history;
-- **T** = infohashes currently returned by TorrServer;
+- **S** = infohashes in the current TorrServer snapshot whose records contain usable `FileStats`;
 - **I** = infohashes in the shared SQLite import-history table.
 
-Normal mode:
+Normal mode treats hashes in **S** as already ready and preserves historical entries in **I**:
 
-    Candidates = A − T − I
+    New candidates = A − S − I
 
-A hash is not a candidate if it is already in TorrServer or if this importer family has successfully imported it before.
+A hash present in TorrServer but without usable `FileStats` is not treated as ready. If it is not already in successful history, it enters the metadata-observation/recovery path; a live object is inspected using `action=get` instead of blindly adding it again. A `Torrent in db` record may receive one metadata-activation request per verification attempt.
 
-Rebuild mode:
-
-    Candidates = A − T
-
-The --rebuild option ignores the historical exclusion **I**, but still checks current TorrServer membership. It does not truncate or recreate the SQLite database.
+Rebuild mode ignores the historical exclusion **I**, but still distinguishes ready hashes in **S** from present-but-incomplete hashes. It does not truncate or recreate the SQLite database.
 
 This distinction is central to the user-removal policy. If a previously imported torrent is deliberately removed from TorrServer, normal mode sees it in **I** but not **T** and will skip it instead of silently restoring it. A manual rebuild expresses a new decision to repopulate any missing Grabbed items still present in Arr history.
 
@@ -91,7 +87,9 @@ Every systemd instance uses its own configuration and default lock file, but the
 
     /var/lib/torr-arr-importer/state.db
 
-The database records a successfully imported hash after TorrServer has confirmed the expected hash in its response. The same record includes diagnostic fields such as source instance, Arr history/media IDs, title and available provider IDs.
+The v1.3.4 candidate records a new successful import only after the exact hash exposes a non-empty `FileStats` list with positive unique file IDs and unique safe relative paths. The same SQLite record includes diagnostic fields such as source instance, Arr history/media IDs, title and available provider IDs.
+
+The v1.3.3 `imports` table does not record the verification method. For that reason, the candidate does not automatically reclassify old success rows or resurrect missing hashes; the 32 items affected by the old list-only rule need a separate, cautious reassessment.
 
 The shared database is not an independent inventory of TorrServer. TorrServer membership is always checked separately. Its purpose is to remember intentional prior imports even after a user removes a torrent from TorrServer.
 
@@ -165,28 +163,40 @@ target_quality is descriptive configuration data. It represents which Arr lane c
 ## 9. Duplicate, retry and failure behavior
 
 - One newest Arr history row is retained per hash before candidate selection.
-- TorrServer presence is checked before each add. The in-memory TorrServer hash set is updated after a successful add, so another occurrence of the same hash in the same run is skipped.
+- A hash with usable `FileStats` is considered ready. A hash present without usable `FileStats` is not considered imported just because TorrServer lists it.
+- Present-but-incomplete live objects are inspected with `action=get`; the importer does not blindly send a duplicate add. A `Torrent in db` record may get one metadata-activation request per verification attempt, but never after that attempt's verification deadline.
+- A missing hash may be added or retried. An incomplete live object is re-observed instead; if it disappears and the verification deadline expires, the normal bounded retry policy applies.
 - Permanent HTTP 4xx responses, including 401/403, are not retried.
 - HTTP 408, 429, 5xx and network failures can be retried according to retry_count and retry_delay.
 - API-like URL query credentials are redacted in logs/exceptions.
 - Each instance has its own process lock, so overlapping runs of that instance do not run concurrently.
-- Failed candidate additions are logged with the hash and a sanitized error; successful additions are recorded in SQLite only after TorrServer confirms the expected hash.
-- --dry-run prints candidate decisions and media identifiers but does not add torrents or record successful imports.
+- Successful new/pending imports are recorded in SQLite only after usable `FileStats` is observed for the exact hash.
+- `--dry-run` prints candidate decisions and media identifiers but does not add torrents or record successful imports.
+
+### Radarr blocklist behavior retained in the v1.3.4 candidate (live terminal-path validation pending)
+
+- The opt-out setting radarr_blocklist_enabled defaults to true for Radarr and is ignored by Sonarr.
+- Only pending_adds rows with status = 'failed' and attempt_count >= max_add_attempts are eligible. A row marked failed by a permanent API rejection before reaching the configured count is saved as skipped_attempt_limit and is not blocklisted. Rows in retry_wait and permanent preparation failures before a TorrServer add are excluded.
+- The importer calls POST /api/v3/history/failed/{arr_history_id} so Radarr can execute its native failed-download event path and add the exact history Grab to the blocklist. This is not a direct POST /api/v3/blocklist operation; the public API has no blocklist creation endpoint.
+- The outcome is persisted in `pending_adds.radarr_blocklist_status`, `radarr_blocklist_last_error`, and `radarr_blocklist_verify_misses`. The v1.3.4 candidate additionally adds `metadata_activation_attempt` in-place to bound DB-only metadata activation.
+- On first migration, old rows already marked failed are assigned legacy_skipped. This intentionally prevents updating the code from retrospectively acting on a batch of old failures. Newly terminal rows use the default NULL state and are processed.
+- HTTP/network results that do not establish whether Radarr completed the failed-history action enter verify_pending. Later runs query /api/v3/blocklist/movie?movieId=...; because the public resource does not expose a torrent hash, recovery can only compare the source release title. The importer does not automatically repeat the non-idempotent failed-history POST.
+- The blocklist result is appended to the existing terminal Apprise failure summary, when notifications are enabled; separate blocklist-only alerts are not emitted. The skipped_attempt_limit outcome is explained in the same message.
 
 ## 10. Notification state and failure summaries
 
-Notification delivery is an auxiliary side effect and does not change import, retry or exit semantics. Configured instances send POST JSON to `<apprise_url>/notify/<config_key>`; routing is selected by the `critical` or `warnings` tag, with Apprise type `failure` or `warning`. The importer never stores Telegram credentials.
+The implemented terminal-only behavior sends no messages for pending or retry_wait attempts. Once a failure is terminal—or a permanent preparation error prevents the TorrServer add—the importer creates a grouped critical/failure message with media title, selected release title, a plain-language cause, attempts used or a permanent-error explanation, a recommendation to choose another release, and an optional Arr card link. If Seerr Watchlist is enabled, the same message includes the latest registration result. No separate warnings message or Seerr notification is emitted.
 
-The existing SQLite database is extended in place:
-- `pending_adds.media_title` stores the Arr media title separately from the selected release title in `pending_adds.title`.
-- `pending_adds.title_slug` stores the Arr-provided slug used for an optional browser-facing card URL.
-- `pending_adds.notification_attempted_at` makes final alerts one-shot; failures already in `failed` before the v1.2.0 migration are baselined to avoid historical notification floods.
-- `notification_state` stores a per-instance fingerprint of the retry-wait count and attempt-number distribution. Names and identities are intentionally excluded from this fingerprint and interim message.
-- `terminal_events` deduplicates permanent errors that occur before an add can be created, such as an expired Arr history download URL (HTTP 410).
+Terminal notification state is extended in place in the existing SQLite DB:
+- notification_attempted_at is set only after a successful 2xx response from Apprise.
+- notification_attempt_count, notification_next_retry_at and notification_last_error retain delivery retry state when Apprise is unavailable.
+- Retry delays increase (1, 5, 15, 30 and then 60 minutes, one-hour cap) and survive process restarts.
+- Permanent errors before an add are deduplicated in terminal_events; failed verification attempts are persisted in pending_adds.
+- Distinct terminal rows without TMDb IDs remain distinct messages; the notification path does not merge them by a missing identifier.
 
-The optional `arr_ui_url` is a browser-facing base URL, separate from `arr_url` (the API base). A link is built from the media `titleSlug` and the instance type (`/movie/<slug>` for Radarr or `/series/<slug>` for Sonarr); if either value is unavailable, the alert omits the link. Verify the configured base URL is reachable from the receiving Telegram client.
+The optional arr_ui_url is a browser-facing base URL, separate from arr_url (the API base). A link is built from the Arr titleSlug and the instance type (/movie/<slug> for Radarr or /series/<slug> for Sonarr); if either value is unavailable, the alert omits the link.
 
-The Apprise request uses a bounded timeout and no retry loop. Delivery failures are written to the local service log only; the importer does not recursively notify about notification failures. A terminal alert is marked attempted after one delivery attempt, avoiding repeated alerts on every timer cycle.
+Apprise delivery is at-least-once. If a request times out after Apprise has already accepted it, retrying may duplicate the message; strict exactly-once delivery cannot be inferred from a timed-out HTTP request. Delivery failures are logged locally and do not change import/retry state or trigger recursive alerts. The legacy notification_tag_warning setting is still parsed for compatibility, but current user-facing alerts use only notification_tag_critical.
 
 ## 11. Component boundaries
 

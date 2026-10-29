@@ -63,11 +63,13 @@ def make_config(root):
         verification_poll_interval_sec=0.2,
         retry_backoff_sec=1,
         max_add_attempts=3,
+        radarr_blocklist_enabled=True,
+        sonarr_blocklist_enabled=True,
     )
 
 
 class VerificationEvidenceTests(unittest.TestCase):
-    def test_hash_echo_without_readiness_is_not_confirmed(self):
+    def test_hash_presence_without_file_stats_is_not_success(self):
         record = {
             "hash": HASH1,
             "stat": 0,
@@ -75,37 +77,34 @@ class VerificationEvidenceTests(unittest.TestCase):
         }
         self.assertIsNone(importer.verification_evidence(record))
 
-    def test_usable_file_stats_confirm_readiness(self):
-        self.assertEqual(importer.verification_evidence(ready_record(HASH1)), "file-stats")
-
-    def test_working_status_is_recognized(self):
+    def test_valid_file_stats_are_success_evidence(self):
+        self.assertEqual(importer.verification_evidence(ready_record(HASH1)), "usable-file-stats")
         self.assertEqual(
-            importer.verification_evidence(
-                {"hash": HASH1, "stat": 3, "stat_string": "Torrent working"}
-            ),
-            "working-status",
+            importer.verification_evidence({
+                "hash": HASH1, "FileStats": [{"ID": 1, "Path": "Season 1/Episode 1.mkv"}],
+            }),
+            "usable-file-stats",
         )
+        self.assertIsNone(importer.verification_evidence(None))
 
-    def test_database_only_record_is_recognized(self):
-        self.assertEqual(
-            importer.verification_evidence(
-                {"hash": HASH1, "stat": 5, "stat_string": "Torrent in db"}
-            ),
-            "database-presence",
-        )
-
-    def test_bad_file_stats_do_not_confirm(self):
-        self.assertIsNone(
-            importer.verification_evidence(
-                {
-                    "hash": HASH1,
-                    "stat": 1,
-                    "stat_string": "Torrent getting info",
-                    "file_stats": [{"id": 0, "path": ""}],
-                }
-            )
-        )
-
+    def test_empty_or_malformed_file_stats_are_rejected(self):
+        invalid_stats = [
+            [],
+            [{"id": 0, "path": "movie.mkv"}],
+            [{"id": 1, "path": "movie.mkv"}, {"id": 1, "path": "other.mkv"}],
+            [{"id": 1, "path": "movie.mkv"}, {"id": 2, "path": "movie.mkv"}],
+            [{"id": 1, "path": "../outside.mkv"}],
+            [{"id": 1, "path": "/absolute/movie.mkv"}],
+            [{"id": 1, "path": "C:/outside/movie.mkv"}],
+            [{"id": 1, "path": r"folder\\movie.mkv"}],
+            [{"id": 1, "path": ""}],
+            ["not-a-file-object"],
+        ]
+        for stats in invalid_stats:
+            with self.subTest(stats=stats):
+                self.assertIsNone(
+                    importer.verification_evidence({"hash": HASH1, "file_stats": stats})
+                )
 
 class PendingStateTests(unittest.TestCase):
     def test_pending_hash_is_not_imported_until_confirmation(self):
@@ -226,6 +225,208 @@ class BatchVerificationTests(unittest.TestCase):
             self.assertEqual(db.pending_rows(), [])
             db.close()
 
+    def test_present_live_hash_without_file_stats_is_reobserved_not_readded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab()
+            live_incomplete = {
+                "hash": HASH1, "stat": 1, "stat_string": "Torrent getting info",
+            }
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(
+                    importer, "fetch_torrserver",
+                    side_effect=[[live_incomplete], [ready_record(HASH1)]],
+                ),
+                mock.patch.object(importer, "fetch_media", return_value={"imdbId": "tt123"}),
+                mock.patch.object(importer, "fetch_torrserver_item", return_value=live_incomplete),
+                mock.patch.object(importer, "add_to_torrserver") as add_mock,
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 0)
+            add_mock.assert_not_called()
+            db = importer.StateDB(cfg.state_db)
+            self.assertEqual(db.all_hashes(), {HASH1})
+            self.assertEqual(db.pending_rows(), [])
+            db.close()
+
+    def test_db_only_hash_activates_metadata_once_then_waits_for_file_stats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab()
+            db_only = {
+                "hash": HASH1, "stat": 5, "stat_string": "Torrent in db",
+            }
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(
+                    importer, "fetch_torrserver",
+                    side_effect=[[db_only], [ready_record(HASH1)]],
+                ),
+                mock.patch.object(importer, "fetch_media", return_value={"imdbId": "tt123"}),
+                mock.patch.object(
+                    importer, "add_to_torrserver",
+                    return_value={"hash": HASH1, "stat_string": "Torrent added"},
+                ) as add_mock,
+                mock.patch.object(importer, "fetch_torrserver_item") as get_mock,
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 0)
+            add_mock.assert_called_once()
+            get_mock.assert_not_called()
+            db = importer.StateDB(cfg.state_db)
+            self.assertEqual(db.all_hashes(), {HASH1})
+            self.assertEqual(db.pending_rows(), [])
+            db.close()
+
+    def test_expired_pending_db_only_does_not_send_metadata_activation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab()
+            db = importer.StateDB(cfg.state_db)
+            db.begin_pending(grab, cfg.name, {"imdbId": "tt123"}, cfg.verification_timeout_sec)
+            db.conn.execute(
+                "UPDATE pending_adds SET deadline_at=? WHERE hash=?",
+                (
+                    (importer.datetime.now(importer.timezone.utc) - importer.timedelta(seconds=1)).isoformat(),
+                    HASH1,
+                ),
+            )
+            db.conn.commit()
+            db.close()
+
+            db_only = {"hash": HASH1, "stat": 5, "stat_string": "Torrent in db"}
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(importer, "fetch_torrserver", return_value=[db_only]),
+                mock.patch.object(importer, "fetch_media", return_value={"imdbId": "tt123"}),
+                mock.patch.object(importer, "add_to_torrserver") as add_mock,
+                mock.patch.object(importer, "pending_deadline", wraps=importer.pending_deadline),
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 1)
+            add_mock.assert_not_called()
+            db = importer.StateDB(cfg.state_db)
+            self.assertEqual(db.pending_rows()[0]["status"], "retry_wait")
+            self.assertNotIn(HASH1, db.all_hashes())
+            db.close()
+
+    def test_due_retry_with_present_live_hash_does_not_send_duplicate_add(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab()
+            db = importer.StateDB(cfg.state_db)
+            db.begin_pending(grab, cfg.name, {"imdbId": "tt123"}, cfg.verification_timeout_sec)
+            db.conn.execute(
+                "UPDATE pending_adds SET status='retry_wait', attempt_count=1, next_retry_at=? WHERE hash=?",
+                (
+                    (importer.datetime.now(importer.timezone.utc) - importer.timedelta(seconds=1)).isoformat(),
+                    HASH1,
+                ),
+            )
+            db.conn.commit()
+            db.close()
+
+            live_incomplete = {
+                "hash": HASH1, "stat": 2, "stat_string": "Torrent working",
+            }
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(
+                    importer, "fetch_torrserver",
+                    side_effect=[[live_incomplete], [ready_record(HASH1)]],
+                ),
+                mock.patch.object(importer, "fetch_media", return_value={"imdbId": "tt123"}),
+                mock.patch.object(importer, "fetch_torrserver_item", return_value=live_incomplete),
+                mock.patch.object(importer, "add_to_torrserver") as add_mock,
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 0)
+            add_mock.assert_not_called()
+            db = importer.StateDB(cfg.state_db)
+            self.assertEqual(db.all_hashes(), {HASH1})
+            self.assertEqual(db.pending_rows(), [])
+            db.close()
+
+    def test_due_retry_with_absent_hash_submits_another_add(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab()
+            db = importer.StateDB(cfg.state_db)
+            db.begin_pending(grab, cfg.name, {"imdbId": "tt123"}, cfg.verification_timeout_sec)
+            db.conn.execute(
+                "UPDATE pending_adds SET status='retry_wait', attempt_count=1, next_retry_at=? WHERE hash=?",
+                (
+                    (importer.datetime.now(importer.timezone.utc) - importer.timedelta(seconds=1)).isoformat(),
+                    HASH1,
+                ),
+            )
+            db.conn.commit()
+            db.close()
+
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(
+                    importer, "fetch_torrserver",
+                    side_effect=[[], [ready_record(HASH1)]],
+                ),
+                mock.patch.object(importer, "fetch_media", return_value={"imdbId": "tt123"}),
+                mock.patch.object(
+                    importer, "add_to_torrserver",
+                    return_value={"hash": HASH1, "stat_string": "Torrent added"},
+                ) as add_mock,
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 0)
+            add_mock.assert_called_once()
+            db = importer.StateDB(cfg.state_db)
+            self.assertEqual(db.all_hashes(), {HASH1})
+            self.assertEqual(db.pending_rows(), [])
+            db.close()
+
+    def test_action_get_404_does_not_count_as_success_or_resend_add(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            cfg = importer.replace(
+                cfg, verification_timeout_sec=10, verification_poll_interval_sec=0.2,
+            )
+            grab = make_grab()
+            live_incomplete = {
+                "hash": HASH1, "stat": 1, "stat_string": "Torrent getting info",
+            }
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(
+                    importer, "fetch_torrserver",
+                    side_effect=[[live_incomplete], []],
+                ),
+                mock.patch.object(importer, "fetch_media", return_value={"imdbId": "tt123"}),
+                mock.patch.object(
+                    importer, "fetch_torrserver_item",
+                    side_effect=importer.HttpStatusError(
+                        404, "POST", "http://127.0.0.1:8092/torrents", "not found",
+                    ),
+                ),
+                mock.patch.object(
+                    importer, "pending_deadline",
+                    return_value=importer.datetime.now(importer.timezone.utc) - importer.timedelta(seconds=1),
+                ),
+                mock.patch.object(importer, "add_to_torrserver") as add_mock,
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 1)
+            add_mock.assert_not_called()
+            db = importer.StateDB(cfg.state_db)
+            self.assertNotIn(HASH1, db.all_hashes())
+            self.assertEqual(db.pending_rows()[0]["status"], "retry_wait")
+            db.close()
+
     def test_restart_reconciles_pending_hash_without_resending_add(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = make_config(Path(tmp))
@@ -236,7 +437,8 @@ class BatchVerificationTests(unittest.TestCase):
 
             with (
                 mock.patch.object(importer, "fetch_history", return_value=[grab]),
-                mock.patch.object(importer, "fetch_torrserver", return_value=[ready_record(HASH1)]),
+                mock.patch.object(importer, "fetch_torrserver", return_value=[{"hash": HASH1, "stat": 0, "stat_string": "Torrent added"}]),
+                mock.patch.object(importer, "fetch_torrserver_item", return_value=ready_record(HASH1)),
                 mock.patch.object(importer, "fetch_media", return_value={"imdbId": "tt123"}),
                 mock.patch.object(importer, "add_to_torrserver") as add_mock,
             ):
@@ -249,6 +451,112 @@ class BatchVerificationTests(unittest.TestCase):
             self.assertEqual(db.pending_rows(), [])
             db.close()
 
+
+    def test_terminal_failure_is_not_confirmed_if_hash_lacks_file_stats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab(HASH1, 454, "Viking Quest")
+            db = importer.StateDB(cfg.state_db)
+            db.begin_pending(grab, cfg.name, {"title": "Viking Quest"}, 120)
+            db.conn.execute(
+                """UPDATE pending_adds SET status='failed', attempt_count=3,
+                   radarr_blocklist_status='legacy_skipped' WHERE hash=?""",
+                (HASH1,),
+            )
+            db.conn.commit()
+            db.close()
+
+            listed_but_not_ready = {"hash": HASH1, "stat": 0, "stat_string": "Torrent added"}
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(importer, "fetch_torrserver", return_value=[listed_but_not_ready]),
+                mock.patch.object(importer, "fetch_media") as media_mock,
+                mock.patch.object(importer, "add_to_torrserver") as add_mock,
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 0)
+            media_mock.assert_not_called()
+            add_mock.assert_not_called()
+            db = importer.StateDB(cfg.state_db)
+            self.assertNotIn(HASH1, db.all_hashes())
+            self.assertEqual(len(db.pending_rows(cfg.name)), 1)
+            self.assertEqual(db.pending_rows(cfg.name)[0]["status"], "failed")
+            db.close()
+
+    def test_stale_pending_row_is_deleted_when_hash_is_already_in_import_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab()
+            db = importer.StateDB(cfg.state_db)
+            db.begin_pending(grab, cfg.name, {"imdbId": "tt123"}, 120)
+            # Simulate a legacy/inconsistent state where a verified import and an
+            # unresolved pending row coexist for the same hash.
+            db.add(grab, cfg.name, {"imdbId": "tt123"})
+            self.assertEqual(len(db.pending_rows(cfg.name)), 1)
+            db.close()
+
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(importer, "fetch_torrserver", return_value=[]),
+                mock.patch.object(importer, "fetch_media") as media_mock,
+                mock.patch.object(importer, "add_to_torrserver") as add_mock,
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 0)
+            media_mock.assert_not_called()
+            add_mock.assert_not_called()
+            db = importer.StateDB(cfg.state_db)
+            self.assertIn(HASH1, db.all_hashes())
+            self.assertEqual(db.pending_rows(cfg.name), [])
+            db.close()
+
+    def test_newer_radarr_grab_rearms_old_terminal_failure_for_same_hash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            old_grab = make_grab(HASH1, 454, "Old Viking Quest Grab")
+            new_grab = make_grab(HASH1, 475, "Viking Quest New Grab")
+            db = importer.StateDB(cfg.state_db)
+            db.begin_pending(old_grab, cfg.name, {"title": "Viking Quest"}, 120)
+            db.conn.execute(
+                """UPDATE pending_adds SET status='failed', attempt_count=3,
+                   radarr_blocklist_status='legacy_skipped',
+                   last_error='old terminal failure' WHERE hash=?""",
+                (HASH1,),
+            )
+            db.conn.commit()
+            db.close()
+
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[new_grab]),
+                mock.patch.object(importer, "fetch_torrserver", return_value=[]),
+                mock.patch.object(
+                    importer, "fetch_media",
+                    return_value={"title": "Viking Quest", "titleSlug": "viking-quest-2014", "tmdbId": 1234},
+                ),
+                mock.patch.object(
+                    importer, "add_to_torrserver",
+                    side_effect=importer.HttpStatusError(
+                        400, "POST", "http://127.0.0.1:8092/torrents", "simulated permanent response",
+                    ),
+                ) as add_mock,
+            ):
+                rc = importer.run(cfg)
+
+            # The simulated permanent API error ends this unit test quickly, after
+            # asserting the fresh Grab was submitted exactly once.
+            self.assertEqual(rc, 1)
+            add_mock.assert_called_once()
+            self.assertEqual(add_mock.call_args.args[2].history_id, 475)
+            db = importer.StateDB(cfg.state_db)
+            row = db.pending_rows(cfg.name)[0]
+            self.assertEqual(row["arr_history_id"], 475)
+            self.assertEqual(row["title"], "Viking Quest New Grab")
+            self.assertEqual(row["attempt_count"], 1)
+            self.assertEqual(row["status"], "failed")
+            self.assertNotEqual(row["radarr_blocklist_status"], "legacy_skipped")
+            db.close()
 
     def test_acknowledged_or_uncertain_add_timeout_never_becomes_import_success(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -349,6 +657,7 @@ class StateMigrationTests(unittest.TestCase):
             self.assertEqual(len(initialized_columns), 2)
             self.assertIn("seerr_watchlist_status", initialized_columns[0])
             self.assertIn("seerr_watchlist_warning_notified_at", initialized_columns[0])
+            self.assertIn("metadata_activation_attempt", initialized_columns[0])
             self.assertEqual(initialized_columns[0], initialized_columns[1])
 
     def test_v11_database_migrates_in_place_and_baselines_old_failed_rows(self):
@@ -409,7 +718,11 @@ class StateMigrationTests(unittest.TestCase):
             self.assertEqual(row["status"], "failed")
             self.assertEqual(row["attempt_count"], 3)
             self.assertIsNotNone(row["notification_attempted_at"])
+            self.assertEqual(row["radarr_blocklist_status"], "legacy_skipped")
             self.assertIn("media_title", {
+                item["name"] for item in db.conn.execute("PRAGMA table_info(pending_adds)")
+            })
+            self.assertIn("metadata_activation_attempt", {
                 item["name"] for item in db.conn.execute("PRAGMA table_info(pending_adds)")
             })
             self.assertEqual(db.unnotified_terminal_failures("radarr-1080"), [])
@@ -540,8 +853,9 @@ class SeerrWatchlistTests(unittest.TestCase):
                 for row in db.conn.execute("PRAGMA table_info(terminal_events)").fetchall()
             }
             for column in (
-                "tmdb_id", "tvdb_id", "seerr_watchlist_status",
-                "seerr_watchlist_error_fingerprint",
+                "tmdb_id", "tvdb_id", "notification_attempt_count",
+                "notification_next_retry_at", "notification_last_error",
+                "seerr_watchlist_status", "seerr_watchlist_error_fingerprint",
                 "seerr_watchlist_error_notified_fingerprint",
                 "seerr_watchlist_warning_notified_at",
             ):
@@ -553,7 +867,7 @@ class SeerrWatchlistTests(unittest.TestCase):
             self.assertEqual(legacy["reason"], "old failure")
             db.close()
 
-    def test_movie_post_adds_once_and_sends_warning_to_warnings_tag(self):
+    def test_movie_post_adds_once_without_a_separate_notification(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self.make_seerr_config(Path(tmp))
             db = importer.StateDB(cfg.state_db)
@@ -576,14 +890,10 @@ class SeerrWatchlistTests(unittest.TestCase):
             self.assertEqual(posts[0]["payload"], {"tmdbId": 12345, "mediaType": "movie"})
             self.assertTrue(posts[0]["api_key_header"])
             self.assertEqual(posts[0]["api_key"], "test-seerr-key")
-            self.assertEqual(len(sent), 1)
-            self.assertEqual(sent[0]["type"], "warning")
-            self.assertEqual(sent[0]["tag"], "warnings")
-            self.assertIn("не означает, что медиа уже доступно", sent[0]["body"])
-            self.assertIn("The Example Movie", sent[0]["body"])
+            self.assertEqual(sent, [])
             row = db.pending_rows(cfg.name)[0]
             self.assertEqual(row["seerr_watchlist_status"], "added")
-            self.assertIsNotNone(row["seerr_watchlist_warning_notified_at"])
+            self.assertIsNone(row["seerr_watchlist_warning_notified_at"])
             db.close()
 
     def test_series_post_requests_the_whole_series_at_title_level(self):
@@ -610,8 +920,7 @@ class SeerrWatchlistTests(unittest.TestCase):
             self.assertEqual(post["payload"], {"tmdbId": 9876, "mediaType": "tv"})
             self.assertNotIn("seasons", post["payload"])
             self.assertNotIn("episodes", post["payload"])
-            self.assertEqual(sent[0][3], "warning")
-            self.assertEqual(sent[0][4], "warnings")
+            self.assertEqual(sent, [])
             db.close()
 
     def test_duplicate_409_is_accepted_only_after_local_watchlist_verification(self):
@@ -642,8 +951,7 @@ class SeerrWatchlistTests(unittest.TestCase):
             self.assertIn("/api/v1/user/1/watchlist?page=1", calls[1]["url"])
             row = db.pending_rows(cfg.name)[0]
             self.assertEqual(row["seerr_watchlist_status"], "already_present")
-            self.assertEqual(len(sent), 1)
-            self.assertEqual(sent[0]["type"], "warning")
+            self.assertEqual(sent, [])
             db.close()
 
     def test_409_without_local_requester_confirmation_is_a_critical_error(self):
@@ -674,9 +982,7 @@ class SeerrWatchlistTests(unittest.TestCase):
                 importer.process_seerr_watchlist(cfg, db)
             row = db.pending_rows(cfg.name)[0]
             self.assertEqual(row["seerr_watchlist_status"], "error")
-            errors = [item for item in sent if item["tag"] == "critical" and item["type"] == "failure"]
-            self.assertEqual(len(errors), 1)  # unchanged error is not notified every timer run
-            self.assertIn("not found", errors[0]["body"])
+            self.assertEqual(sent, [])
             self.assertNotIn("test-seerr-key", repr(sent))
             db.close()
 
@@ -695,10 +1001,7 @@ class SeerrWatchlistTests(unittest.TestCase):
             ):
                 importer.process_seerr_watchlist(cfg, db)
                 importer.process_seerr_watchlist(cfg, db)
-            self.assertEqual(len(sent), 1)
-            self.assertEqual(sent[0]["tag"], "critical")
-            self.assertEqual(sent[0]["type"], "failure")
-            self.assertIn("TMDb ID is missing", sent[0]["body"])
+            self.assertEqual(sent, [])
             self.assertEqual(db.pending_rows(cfg.name)[0]["seerr_watchlist_status"], "missing_tmdb_id")
             db.close()
 
@@ -730,7 +1033,7 @@ class SeerrWatchlistTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(row["tmdb_id"], "4567")
             self.assertEqual(row["seerr_watchlist_status"], "added")
-            self.assertEqual(sent[0]["tag"], "warnings")
+            self.assertEqual(sent, [])
             db.close()
 
     def test_only_final_failures_for_current_arr_instance_are_selected(self):
@@ -752,6 +1055,397 @@ class SeerrWatchlistTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["record_key"], HASH1)
             db.close()
+
+
+class RadarrBlocklistTests(unittest.TestCase):
+    def make_failed(self, root, *, arr_type="radarr", name="radarr-1080"):
+        cfg = importer.replace(make_config(root), max_add_attempts=1).normalized()
+        if arr_type == "sonarr":
+            cfg = importer.replace(
+                cfg, name=name, arr_type="sonarr", category="tv",
+                radarr_blocklist_enabled=True,
+                sonarr_blocklist_enabled=True,
+            ).normalized()
+        db = importer.StateDB(cfg.state_db)
+        grab = make_grab(HASH1, 73, "Blocklist.Test.Release.1080p.WEB-DL")
+        media = {
+            "title": "Blocklist Test Movie",
+            "titleSlug": "blocklist-test-movie",
+        }
+        db.begin_pending(grab, cfg.name, media, cfg.verification_timeout_sec)
+        self.assertEqual(
+            db.fail_pending(
+                HASH1, "TorrServer metadata timeout",
+                cfg.max_add_attempts, cfg.retry_backoff_sec,
+            ),
+            "failed",
+        )
+        return cfg, db
+
+    def fake_arr(self, responses):
+        calls = []
+
+        class FakeArr:
+            def request_json(_self, method, url, payload=None, api_key=False,
+                             retry_count=0, retry_delay=1.0):
+                calls.append({
+                    "method": method,
+                    "url": url,
+                    "payload": payload,
+                    "api_key": api_key,
+                    "retry_count": retry_count,
+                    "retry_delay": retry_delay,
+                })
+                if not responses:
+                    raise AssertionError(f"Unexpected Arr API call: {method} {url}")
+                value = responses.pop(0)
+                if isinstance(value, Exception):
+                    raise value
+                return value
+
+        return FakeArr(), calls
+
+    def test_blocklist_is_enabled_by_default(self):
+        self.assertTrue(make_config(Path("/tmp")).radarr_blocklist_enabled)
+
+    def test_toml_omission_defaults_radarr_blocklist_to_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "radarr.toml"
+            config_path.write_text(
+                f"""
+name = "radarr-1080"
+arr_type = "radarr"
+arr_url = "http://127.0.0.1:7878"
+arr_api_key = "test-key"
+torrserver_url = "http://127.0.0.1:8092"
+category = "movie"
+target_quality = 1080
+state_db = "{Path(tmp) / 'state.db'}"
+""",
+                encoding="utf-8",
+            )
+            self.assertTrue(importer.config_from_file(str(config_path)).radarr_blocklist_enabled)
+
+    def test_terminal_failure_uses_native_radarr_failed_history_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, db = self.make_failed(Path(tmp))
+            arr, calls = self.fake_arr([None])
+            try:
+                importer.process_radarr_blocklist(cfg, arr, db)
+                self.assertEqual(len(calls), 1)
+                call = calls[0]
+                self.assertEqual(call["method"], "POST")
+                self.assertTrue(call["url"].endswith("/api/v3/history/failed/73"))
+                self.assertTrue(call["api_key"])
+                self.assertEqual(call["retry_count"], 0)
+                row = db.pending_rows(cfg.name)[0]
+                self.assertEqual(row["radarr_blocklist_status"], "blocked")
+                self.assertEqual(row["radarr_blocklist_verify_misses"], 0)
+            finally:
+                db.close()
+
+    def test_already_ambiguous_request_is_verified_without_resending_post(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, db = self.make_failed(Path(tmp))
+            db.set_radarr_blocklist_state(
+                HASH1, "verify_pending", error="connection closed after request", verify_misses=0
+            )
+            release_title = db.pending_rows(cfg.name)[0]["title"]
+            arr, calls = self.fake_arr([[{"sourceTitle": release_title, "id": 444}]])
+            try:
+                importer.process_radarr_blocklist(cfg, arr, db)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0]["method"], "GET")
+                self.assertIn("/api/v3/blocklist/movie?movieId=", calls[0]["url"])
+                row = db.pending_rows(cfg.name)[0]
+                self.assertEqual(row["radarr_blocklist_status"], "already_present")
+                self.assertEqual(row["radarr_blocklist_verify_misses"], 0)
+            finally:
+                db.close()
+
+    def test_ambiguous_post_is_not_repeated_and_fails_after_three_empty_checks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, db = self.make_failed(Path(tmp))
+            db.set_radarr_blocklist_state(
+                HASH1, "verify_pending", error="HTTP 502 after request", verify_misses=0
+            )
+            arr, calls = self.fake_arr([[], [], []])
+            try:
+                for _ in range(3):
+                    importer.process_radarr_blocklist(cfg, arr, db)
+                self.assertEqual([call["method"] for call in calls], ["GET", "GET", "GET"])
+                row = db.pending_rows(cfg.name)[0]
+                self.assertEqual(row["radarr_blocklist_status"], "failed")
+                self.assertEqual(row["radarr_blocklist_verify_misses"], 3)
+                self.assertIn("was ambiguous", row["radarr_blocklist_last_error"])
+            finally:
+                db.close()
+
+    def test_terminal_error_before_configured_attempt_limit_is_not_blocklisted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            db = importer.StateDB(cfg.state_db)
+            grab = make_grab(HASH1, 74, "Transiently.Unavailable.Release")
+            db.begin_pending(grab, cfg.name, {"title": "Test Movie"}, cfg.verification_timeout_sec)
+            self.assertEqual(
+                db.fail_pending(
+                    HASH1, "permanent TorrServer HTTP 400", cfg.max_add_attempts,
+                    cfg.retry_backoff_sec, permanent=True,
+                ),
+                "failed",
+            )
+            arr, calls = self.fake_arr([])
+            try:
+                self.assertEqual(db.pending_rows(cfg.name)[0]["attempt_count"], 1)
+                importer.process_radarr_blocklist(cfg, arr, db)
+                self.assertEqual(calls, [])
+                self.assertEqual(
+                    db.pending_rows(cfg.name)[0]["radarr_blocklist_status"],
+                    "skipped_attempt_limit",
+                )
+                self.assertIn(
+                    "configured attempt limit has not been exhausted",
+                    db.pending_rows(cfg.name)[0]["radarr_blocklist_last_error"],
+                )
+                self.assertIn(
+                    "условие исчерпания попыток не выполнено",
+                    importer.terminal_notification_block(cfg, db.pending_rows(cfg.name)[0]),
+                )
+            finally:
+                db.close()
+
+    def test_permanent_radarr_api_error_is_logged_as_failed_without_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, db = self.make_failed(Path(tmp))
+            arr, calls = self.fake_arr([
+                importer.HttpStatusError(
+                    401, "POST", "http://127.0.0.1:7878/api/v3/history/failed/73", "Unauthorized"
+                )
+            ])
+            try:
+                importer.process_radarr_blocklist(cfg, arr, db)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0]["method"], "POST")
+                row = db.pending_rows(cfg.name)[0]
+                self.assertEqual(row["radarr_blocklist_status"], "failed")
+                self.assertIn("HTTP 401", row["radarr_blocklist_last_error"])
+            finally:
+                db.close()
+
+    def test_network_error_leaves_a_read_only_verification_state(self):
+        from urllib.error import URLError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, db = self.make_failed(Path(tmp))
+            arr, calls = self.fake_arr([URLError("connection reset")])
+            try:
+                importer.process_radarr_blocklist(cfg, arr, db)
+                row = db.pending_rows(cfg.name)[0]
+                self.assertEqual(row["radarr_blocklist_status"], "verify_pending")
+                self.assertEqual(row["radarr_blocklist_verify_misses"], 0)
+                arr2, calls2 = self.fake_arr([[]])
+                importer.process_radarr_blocklist(cfg, arr2, db)
+                self.assertEqual([call["method"] for call in calls2], ["GET"])
+                self.assertEqual(db.pending_rows(cfg.name)[0]["radarr_blocklist_status"], "verify_pending")
+                self.assertEqual(calls[0]["method"], "POST")
+            finally:
+                db.close()
+
+    def test_disabled_and_sonarr_profiles_do_not_call_radarr_blocklist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, db = self.make_failed(Path(tmp))
+            arr, calls = self.fake_arr([])
+            try:
+                disabled = importer.replace(cfg, radarr_blocklist_enabled=False).normalized()
+                importer.process_radarr_blocklist(disabled, arr, db)
+                self.assertEqual(calls, [])
+            finally:
+                db.close()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, db = self.make_failed(Path(tmp), arr_type="sonarr", name="sonarr-1080")
+            arr, calls = self.fake_arr([])
+            try:
+                importer.process_radarr_blocklist(cfg, arr, db)
+                self.assertEqual(calls, [])
+                self.assertIsNone(db.pending_rows(cfg.name)[0]["radarr_blocklist_status"])
+            finally:
+                db.close()
+
+    def test_terminal_preparation_events_are_not_blocklist_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            db = importer.StateDB(cfg.state_db)
+            db.record_terminal_event(
+                event_key=f"{cfg.name}:{HASH1}:prepare",
+                source=cfg.name, arr_type="radarr", category="movie", arr_media_id=124,
+                media_title="Preparation Failure", release_title="Preparation.Release",
+                title_slug="preparation-failure", stage="prepare",
+                reason="HTTP 410 resolving download URL",
+            )
+            arr, calls = self.fake_arr([])
+            try:
+                importer.process_radarr_blocklist(cfg, arr, db)
+                self.assertEqual(calls, [])
+            finally:
+                db.close()
+
+    def test_terminal_apprise_block_mentions_confirmed_outcome_only_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, db = self.make_failed(Path(tmp))
+            try:
+                cfg = importer.replace(cfg, arr_ui_url="http://127.0.0.1:7878").normalized()
+                row = db.pending_rows(cfg.name)[0]
+                row["radarr_blocklist_status"] = "blocked"
+                message = importer.terminal_notification_block(cfg, row)
+                self.assertIn("Блок-лист Radarr: релиз добавлен", message)
+                self.assertIn("Карточка в Radarr:", message)
+                self.assertTrue(message.rstrip().endswith("Блок-лист Radarr: релиз добавлен; Radarr сможет исключить эту раздачу при дальнейшем поиске."))
+                disabled = importer.replace(cfg, radarr_blocklist_enabled=False).normalized()
+                self.assertNotIn(
+                    "Блок-лист Radarr",
+                    importer.terminal_notification_block(disabled, row),
+                )
+                self.assertNotIn(
+                    "Блок-лист Radarr",
+                    importer.terminal_notification_block(cfg, row, preparation=True),
+                )
+            finally:
+                db.close()
+
+
+
+class SonarrBlocklistTests(unittest.TestCase):
+    def make_failed(self, root):
+        cfg = importer.replace(
+            make_config(root),
+            name="sonarr-1080", arr_type="sonarr", category="tv",
+            arr_url="http://127.0.0.1:8989", max_add_attempts=1,
+            radarr_blocklist_enabled=False, sonarr_blocklist_enabled=True,
+        ).normalized()
+        db = importer.StateDB(cfg.state_db)
+        grab = importer.replace(
+            make_grab(HASH1, 73, "Blocklist.Test.Release.S01E01.1080p.WEB-DL"),
+            movie_id=None, series_id=196,
+        )
+        media = {"title": "Blocklist Test Series", "titleSlug": "blocklist-test-series"}
+        db.begin_pending(grab, cfg.name, media, cfg.verification_timeout_sec)
+        self.assertEqual(
+            db.fail_pending(HASH1, "TorrServer metadata timeout",
+                            cfg.max_add_attempts, cfg.retry_backoff_sec),
+            "failed",
+        )
+        return cfg, db
+
+    def fake_arr(self, responses):
+        calls = []
+        class FakeArr:
+            def request_json(_self, method, url, payload=None, api_key=False,
+                             retry_count=0, retry_delay=1.0):
+                calls.append({"method":method,"url":url,"payload":payload,
+                              "api_key":api_key,"retry_count":retry_count,
+                              "retry_delay":retry_delay})
+                if not responses:
+                    raise AssertionError(f"Unexpected Arr API call: {method} {url}")
+                value=responses.pop(0)
+                if isinstance(value, Exception):
+                    raise value
+                return value
+        return FakeArr(), calls
+
+    def test_sonarr_blocklist_is_enabled_by_default(self):
+        cfg=importer.replace(make_config(Path("/tmp")),name="sonarr-1080",
+                             arr_type="sonarr",category="tv").normalized()
+        self.assertTrue(cfg.sonarr_blocklist_enabled)
+
+    def test_sonarr_toml_omission_defaults_blocklisting_to_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path=Path(tmp)/"sonarr.toml"
+            config_path.write_text(
+                f"""
+name = "sonarr-1080"
+arr_type = "sonarr"
+arr_url = "http://127.0.0.1:8989"
+arr_api_key = "test-key"
+torrserver_url = "http://127.0.0.1:8092"
+category = "tv"
+target_quality = 1080
+state_db = "{Path(tmp) / 'state.db'}"
+""",encoding="utf-8")
+            self.assertTrue(importer.config_from_file(str(config_path)).sonarr_blocklist_enabled)
+
+    def test_terminal_failure_uses_native_sonarr_failed_history_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg,db=self.make_failed(Path(tmp)); arr,calls=self.fake_arr([None])
+            try:
+                importer.process_sonarr_blocklist(cfg,arr,db)
+                self.assertEqual(len(calls),1)
+                self.assertEqual(calls[0]["method"],"POST")
+                self.assertTrue(calls[0]["url"].endswith("/api/v3/history/failed/73"))
+                self.assertTrue(calls[0]["api_key"]); self.assertEqual(calls[0]["retry_count"],0)
+                row=db.pending_rows(cfg.name)[0]
+                self.assertEqual(row["sonarr_blocklist_status"],"blocked")
+                self.assertEqual(row["sonarr_blocklist_verify_misses"],0)
+                self.assertIsNone(row["radarr_blocklist_status"])
+            finally: db.close()
+
+    def test_ambiguous_sonarr_request_is_verified_without_resending_post(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg,db=self.make_failed(Path(tmp))
+            db.set_sonarr_blocklist_state(HASH1,"verify_pending",
+                                          error="connection closed after request",verify_misses=0)
+            title=db.pending_rows(cfg.name)[0]["title"]
+            arr,calls=self.fake_arr([{"page":1,"pageSize":1000,"totalRecords":1,
+                "records":[{"id":444,"seriesId":196,"sourceTitle":title}]}])
+            try:
+                importer.process_sonarr_blocklist(cfg,arr,db)
+                self.assertEqual(len(calls),1); self.assertEqual(calls[0]["method"],"GET")
+                self.assertIn("/api/v3/blocklist?",calls[0]["url"])
+                self.assertIn("seriesIds=196",calls[0]["url"])
+                row=db.pending_rows(cfg.name)[0]
+                self.assertEqual(row["sonarr_blocklist_status"],"already_present")
+                self.assertEqual(row["sonarr_blocklist_verify_misses"],0)
+            finally: db.close()
+
+    def test_ambiguous_sonarr_post_is_not_repeated_and_fails_after_three_empty_checks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg,db=self.make_failed(Path(tmp))
+            db.set_sonarr_blocklist_state(HASH1,"verify_pending",
+                                          error="HTTP 502 after request",verify_misses=0)
+            arr,calls=self.fake_arr([{"records":[]},{"records":[]},{"records":[]}])
+            try:
+                for _ in range(3): importer.process_sonarr_blocklist(cfg,arr,db)
+                self.assertEqual([call["method"] for call in calls],["GET","GET","GET"])
+                row=db.pending_rows(cfg.name)[0]
+                self.assertEqual(row["sonarr_blocklist_status"],"failed")
+                self.assertEqual(row["sonarr_blocklist_verify_misses"],3)
+                self.assertIn("was ambiguous",row["sonarr_blocklist_last_error"])
+            finally: db.close()
+
+    def test_disabled_sonarr_blocklist_makes_no_api_calls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg,db=self.make_failed(Path(tmp))
+            disabled=importer.replace(cfg,sonarr_blocklist_enabled=False).normalized()
+            arr,calls=self.fake_arr([])
+            try:
+                importer.process_sonarr_blocklist(disabled,arr,db)
+                self.assertEqual(calls,[])
+                self.assertIsNone(db.pending_rows(cfg.name)[0]["sonarr_blocklist_status"])
+            finally: db.close()
+
+    def test_sonarr_terminal_notification_uses_sonarr_state_and_setting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg,db=self.make_failed(Path(tmp))
+            try:
+                row=db.pending_rows(cfg.name)[0]; row["sonarr_blocklist_status"]="blocked"
+                message=importer.terminal_notification_block(cfg,row)
+                self.assertIn("Блок-лист Sonarr: команда принята",message)
+                self.assertNotIn("Блок-лист Radarr",message)
+                disabled=importer.replace(cfg,sonarr_blocklist_enabled=False).normalized()
+                self.assertNotIn("Блок-лист Sonarr",importer.terminal_notification_block(disabled,row))
+                self.assertNotIn("Блок-лист Sonarr",
+                    importer.terminal_notification_block(cfg,row,preparation=True))
+            finally: db.close()
 
 
 class NotificationTests(unittest.TestCase):
@@ -783,34 +1477,23 @@ class NotificationTests(unittest.TestCase):
             return response
         return send
 
-    def test_retry_warning_is_numeric_aggregated_and_deduplicated(self):
+    def test_retry_wait_items_do_not_send_notifications(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             cfg = self.make_notification_config(root)
             db = importer.StateDB(cfg.state_db)
-            one = make_grab(HASH1, 1, "Private.Release.Name.1080p")
-            two = make_grab(HASH2, 2, "Another.Private.Release.Name.1080p")
-            for grab in (one, two):
+            for grab in (
+                make_grab(HASH1, 1, "Private.Release.Name.1080p"),
+                make_grab(HASH2, 2, "Another.Private.Release.Name.1080p"),
+            ):
                 db.begin_pending(grab, cfg.name, {"title": "Secret Film Title"}, 120)
                 self.assertEqual(db.fail_pending(grab.hash, "metadata timeout", 3, 1), "retry_wait")
 
-            sent = []
-            with mock.patch.object(importer, "urlopen", side_effect=self.fake_apprise(sent)):
+            with mock.patch.object(importer, "urlopen") as send:
                 importer.dispatch_notifications(cfg, db)
-                self.assertEqual(len(sent), 1)
                 importer.dispatch_notifications(cfg, db)
-                self.assertEqual(len(sent), 1)
-
-            payload = sent[0]["payload"]
-            self.assertEqual(sent[0]["url"], "http://192.168.0.14:8000/notify/arr-stack")
-            self.assertEqual(sent[0]["timeout"], 5)
-            self.assertEqual(payload["tag"], "warnings")
-            self.assertEqual(payload["type"], "warning")
-            self.assertIn("2 проблемных раздач", payload["body"])
-            self.assertNotIn("Secret Film Title", payload["body"])
-            self.assertNotIn("Private.Release.Name", payload["body"])
-            self.assertNotIn(HASH1, payload["body"])
-            self.assertNotIn(HASH2, payload["body"])
+                send.assert_not_called()
+            self.assertEqual(len(db.unnotified_terminal_failures(cfg.name)), 0)
             db.close()
 
     def test_terminal_failure_includes_title_release_and_arr_card_once(self):
@@ -823,8 +1506,13 @@ class NotificationTests(unittest.TestCase):
                 {"title": "All Good Things", "titleSlug": "all-good-things-2010-603"},
                 120,
             )
+            db.conn.execute(
+                "UPDATE pending_adds SET attempt_count = ? WHERE hash = ?",
+                (cfg.max_add_attempts, HASH1),
+            )
+            db.conn.commit()
             self.assertEqual(
-                db.fail_pending(HASH1, "verification deadline expired; metadata timeout", 1, 1),
+                db.fail_pending(HASH1, "verification deadline expired; metadata timeout", cfg.max_add_attempts, 1),
                 "failed",
             )
             second = make_grab(HASH2, 2, "Inside.Out.2.2024.1080p.WEB-DL")
@@ -833,8 +1521,13 @@ class NotificationTests(unittest.TestCase):
                 {"title": "Inside Out 2", "titleSlug": "inside-out-2-2024"},
                 120,
             )
+            db.conn.execute(
+                "UPDATE pending_adds SET attempt_count = ? WHERE hash = ?",
+                (cfg.max_add_attempts, HASH2),
+            )
+            db.conn.commit()
             self.assertEqual(
-                db.fail_pending(HASH2, "verification deadline expired; metadata timeout", 1, 1),
+                db.fail_pending(HASH2, "verification deadline expired; metadata timeout", cfg.max_add_attempts, 1),
                 "failed",
             )
             sent = []
@@ -847,7 +1540,9 @@ class NotificationTests(unittest.TestCase):
             payload = sent[0]["payload"]
             self.assertEqual(payload["tag"], "critical")
             self.assertEqual(payload["type"], "failure")
-            self.assertIn("Терминальных ошибок в этой сводке: 2", payload["body"])
+            self.assertIn("Окончательные ошибки передачи в TorrServer: 2.", payload["body"])
+            self.assertIn("Автоматические попытки закончились (3 из 3).", payload["body"])
+            self.assertIn("Советуем выбрать другую раздачу в Radarr", payload["body"])
             self.assertIn("All Good Things", payload["body"])
             self.assertIn("All.Good.Things.2010.1080p.WEB-DL", payload["body"])
             self.assertIn("http://192.168.0.14:7878/movie/all-good-things-2010-603", payload["body"])
@@ -855,6 +1550,81 @@ class NotificationTests(unittest.TestCase):
             self.assertNotIn(HASH1, payload["body"])
             self.assertNotIn(HASH2, payload["body"])
             self.assertEqual(len(db.unnotified_terminal_failures(cfg.name)), 0)
+            db.close()
+
+    def test_final_critical_message_includes_seerr_status_and_arr_card(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = importer.replace(
+                self.make_notification_config(root),
+                seerr_watchlist_enabled=True,
+                seerr_url="http://192.168.0.14:5055",
+                seerr_api_key="test-seerr-key",
+            ).normalized()
+            db = importer.StateDB(cfg.state_db)
+            grab = make_grab(HASH1, 1, "Example.Release.1080p.WEB-DL")
+            db.begin_pending(
+                grab, cfg.name,
+                {"title": "Example Film", "titleSlug": "example-film-2026"},
+                120,
+            )
+            db.conn.execute(
+                "UPDATE pending_adds SET attempt_count = ? WHERE hash = ?",
+                (cfg.max_add_attempts, HASH1),
+            )
+            db.conn.commit()
+            db.fail_pending(HASH1, "verification deadline expired; last observed status=absent-from-list",
+                            cfg.max_add_attempts, 1)
+            db.conn.execute(
+                "UPDATE pending_adds SET seerr_watchlist_status = 'added' WHERE hash = ?",
+                (HASH1,),
+            )
+            db.conn.commit()
+            sent = []
+            with mock.patch.object(importer, "urlopen", side_effect=self.fake_apprise(sent)):
+                importer.dispatch_notifications(cfg, db)
+            self.assertEqual(len(sent), 1)
+            payload = sent[0]["payload"]
+            self.assertEqual(payload["tag"], "critical")
+            self.assertEqual(payload["type"], "failure")
+            self.assertIn("не удалось добавить выбранную раздачу в torrserver", payload["body"].lower())
+            self.assertIn("советуем выбрать другую раздачу в radarr", payload["body"].lower())
+            self.assertIn("фильм добавлен в watchlist администратора seerr", payload["body"].lower())
+            self.assertIn("http://192.168.0.14:7878/movie/example-film-2026", payload["body"])
+            self.assertNotIn('"tag": "warnings"', repr(sent))
+            db.close()
+
+    def test_terminal_items_without_tmdb_ids_remain_separate_in_critical_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = importer.replace(
+                self.make_notification_config(root),
+                seerr_watchlist_enabled=True,
+                seerr_url="http://192.168.0.14:5055",
+                seerr_api_key="test-seerr-key",
+            ).normalized()
+            db = importer.StateDB(cfg.state_db)
+            for h, name in ((HASH1, "Unknown Movie Alpha"), (HASH2, "Unknown Movie Beta")):
+                db.record_terminal_event(
+                    event_key=f"{cfg.name}:{h}:prepare", source=cfg.name,
+                    arr_type="radarr", category="movie", arr_media_id=None,
+                    media_title=name, release_title=f"{name}.WEB-DL",
+                    title_slug=None, stage="prepare",
+                    reason="HTTP 410 resolving download URL", tmdb_id=None,
+                )
+            db.conn.execute(
+                "UPDATE terminal_events SET seerr_watchlist_status = 'missing_tmdb_id' WHERE source = ?",
+                (cfg.name,),
+            )
+            db.conn.commit()
+            sent = []
+            with mock.patch.object(importer, "urlopen", side_effect=self.fake_apprise(sent)):
+                importer.dispatch_notifications(cfg, db)
+            self.assertEqual(len(sent), 1)
+            body = sent[0]["payload"]["body"]
+            self.assertIn("Unknown Movie Alpha", body)
+            self.assertIn("Unknown Movie Beta", body)
+            self.assertEqual(body.count("Не удалось добавить фильм в Watchlist Seerr"), 2)
             db.close()
 
     def test_permanent_prepare_failure_is_aggregated_without_leaking_url(self):
@@ -881,14 +1651,15 @@ class NotificationTests(unittest.TestCase):
             payload = sent[0]["payload"]
             self.assertEqual(payload["tag"], "critical")
             self.assertIn("The Prestige", payload["body"])
-            self.assertIn("HTTP 410 resolving download URL", payload["body"])
+            self.assertIn("ссылка на выбранную раздачу больше недоступна (HTTP 410)", payload["body"])
+            self.assertIn("запрос добавления в TorrServer не выполнялся", payload["body"])
             self.assertNotIn("indexer.invalid", payload["body"])
             self.assertNotIn("do-not-send", payload["body"])
             self.assertNotIn(HASH1, payload["body"])
             self.assertEqual(db.unnotified_terminal_events(cfg.name), [])
             db.close()
 
-    def test_apprise_failure_does_not_raise_or_retry_forever(self):
+    def test_apprise_failure_is_retried_after_persistent_backoff(self):
         from urllib.error import URLError
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -896,13 +1667,39 @@ class NotificationTests(unittest.TestCase):
             db = importer.StateDB(cfg.state_db)
             grab = make_grab(HASH1, 1, "Example.Release.1080p")
             db.begin_pending(grab, cfg.name, {"title": "Example Film"}, 120)
-            db.fail_pending(HASH1, "metadata timeout", 1, 1)
+            db.conn.execute("UPDATE pending_adds SET attempt_count = ? WHERE hash = ?",
+                            (cfg.max_add_attempts, HASH1))
+            db.conn.commit()
+            db.fail_pending(HASH1, "metadata timeout", cfg.max_add_attempts, 1)
 
             with mock.patch.object(importer, "urlopen", side_effect=URLError("offline")) as send:
                 importer.dispatch_notifications(cfg, db)
-                self.assertEqual(len(db.unnotified_terminal_failures(cfg.name)), 0)
-                importer.dispatch_notifications(cfg, db)
                 self.assertEqual(send.call_count, 1)
+            self.assertEqual(len(db.unnotified_terminal_failures(cfg.name)), 0)
+            row = db.pending_rows(cfg.name)[0]
+            self.assertEqual(row["notification_attempt_count"], 1)
+            self.assertIsNotNone(row["notification_next_retry_at"])
+            self.assertIsNone(row["notification_attempted_at"])
+
+            # Backoff prevents every timer run from immediately retrying the same delivery.
+            with mock.patch.object(importer, "urlopen") as send:
+                importer.dispatch_notifications(cfg, db)
+                send.assert_not_called()
+
+            db.conn.execute(
+                "UPDATE pending_adds SET notification_next_retry_at = ? WHERE hash = ?",
+                ("2000-01-01T00:00:00+00:00", HASH1),
+            )
+            db.conn.commit()
+            sent = []
+            with mock.patch.object(importer, "urlopen", side_effect=self.fake_apprise(sent)):
+                importer.dispatch_notifications(cfg, db)
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(sent[0]["payload"]["tag"], "critical")
+            self.assertEqual(db.unnotified_terminal_failures(cfg.name), [])
+            row = db.pending_rows(cfg.name)[0]
+            self.assertIsNotNone(row["notification_attempted_at"])
+            self.assertIsNone(row["notification_next_retry_at"])
             db.close()
 
     def test_notification_disabled_makes_no_http_call(self):

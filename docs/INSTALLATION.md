@@ -1,6 +1,10 @@
 # Installation and configuration
 
-The instructions below describe the v1.3.1 systemd deployment and its optional Seerr Watchlist integration. The four-instance examples are intended to be adapted to the actual addresses, ports and API keys in your installation.
+This guide covers initial setup, configuration and operational safeguards. The in-place upgrade procedure below is a historical record of the v1.3.4 FileStats-verification update performed on MINI-Ubuntu on 2026-10-29; it is not a v1.3.5 upgrade recipe and should not be rerun on that host. Adapt the four-instance examples to the actual addresses, ports and API keys in your installation.
+
+> **Current deployment status (2026-10-29):** `/opt/torr-arr-importer/importer.py --version` returns `1.3.5`. The installed file's `git hash-object` matches the v1.3.5 source file's Git blob SHA (`712d6f4a276602250a25c52c5f5ccf6b0af92667`). GitHub Actions [run #139](https://github.com/evgendman/arr2torr/actions/runs/40844001781) passed on Python 3.11 and 3.12 with 56 tests per version, compilation and version check. Both Radarr's and Sonarr's terminal-failure blocklist paths have live log confirmation; see the [Roadmap](../ROADMAP.md) and [Operations](OPERATIONS.md). No GitHub Release or v1.3.5 tag has been published yet.
+>
+> **Config follow-up:** the current `/etc/torr-arr-importer/radarr-1080.toml` was checked and omits `radarr_blocklist_enabled`, so the current runtime relies on the backward-compatible code default `true`. Keep this setting explicit in active Radarr configs; the command in the blocklisting section shows the required line.
 
 ## Requirements
 
@@ -27,30 +31,36 @@ The installer does not enable timers automatically. Configure and test an instan
 > API keys belong only in local files under /etc/torr-arr-importer/. Never commit a populated config to Git.
 
 
-## Upgrade an existing v1.1.0 deployment in place
+## In-place upgrade procedure from v1.3.3 to v1.3.4 (used on MINI-Ubuntu, 2026-10-29)
 
-The v1.2.0 source/test revision validated in GitHub Actions is commit `74ee8ac9a8a171be790b5cc314b888cf2e5e19f5` (Python 3.11 and 3.12, 19 tests passed). The upgrade is additive: it adds SQLite columns/tables for notification state, but does not clear or rebuild import history. **Do not delete `/var/lib/torr-arr-importer/state.db`.** The commands below preserve the existing configs and timer enablement.
+**Important:** the procedure below records the controlled v1.3.4 code-only update performed on MINI-Ubuntu. Do not rerun it there without a deliberate new upgrade/rollback plan; for another host, review and authorize deployment separately. v1.3.4 requires usable TorrServer `FileStats` before recording success and retains Radarr's terminal-failure blocklist behavior after `max_add_attempts`. A permanent API rejection before that limit is not blocklisted. Sonarr behavior is unchanged.
 
-1. Clone that exact tested revision to a fresh temporary directory, then run tests locally:
+The v1.3.4 candidate adds `metadata_activation_attempt` to `pending_adds` through an in-place SQLite migration; it does not clear or recreate the database. Existing v1.3.3 success-history rows are not automatically reclassified because that version did not record how success was verified. Missing historical hashes remain protected from automatic resurrection. **Do not delete `/var/lib/torr-arr-importer/state.db`.**
+
+1. Prepare the exact tested candidate in a temporary directory and run the checks:
 
        set -euo pipefail
-       SRC="$(mktemp -d /tmp/arr2torr-v1.2.0.XXXXXX)"
-       git clone https://github.com/evgendman/arr2torr.git "$SRC"
-       git -C "$SRC" checkout 74ee8ac9a8a171be790b5cc314b888cf2e5e19f5
+       SRC="$(mktemp -d /tmp/arr2torr-v1.3.4.XXXXXX)"
+       git clone --branch feature/radarr-blocklist-v1.3.2 https://github.com/evgendman/arr2torr.git "$SRC"
+       git -C "$SRC" checkout --detach 78ba4801e5e1fc3cfdc4cb620e2e55853e61573c
        python3 -m py_compile "$SRC/src/importer.py"
        (cd "$SRC" && python3 -m unittest discover -s tests -v)
        python3 "$SRC/src/importer.py" --version
-       printf '%s\n' "$SRC" > /tmp/arr2torr-v1.2.0-source-path
+       printf '%s\n' "$SRC" > /tmp/arr2torr-v1.3.4-source-path
 
-2. Stop only the two timers observed active on MINI-Ubuntu, and wait for any oneshot services to finish. Do not enable either 4K timer:
+   The expected version output is `1.3.4`. This pinned source tree passed GitHub Actions [run #111](https://github.com/evgendman/arr2torr/actions/runs/40833149341) on Python 3.11 and 3.12 with 49 tests. The subsequent PR documentation updates left Python source and tests unchanged; [run #117](https://github.com/evgendman/arr2torr/actions/runs/40833440612) also passed on Python 3.11 and 3.12 with 49 tests.
 
-       sudo systemctl stop torr-arr-importer@radarr-1080.timer torr-arr-importer@sonarr-1080.timer
-       while systemctl is-active --quiet torr-arr-importer@radarr-1080.service || systemctl is-active --quiet torr-arr-importer@sonarr-1080.service; do sleep 1; done
+2. Inspect the live timer state first. Stop only the profile timers that are active and are actually being upgraded. On MINI-Ubuntu at the 2026-10-29 check, `radarr-1080` was active and `sonarr-1080` was inactive; no active 4K timer was reported. For that host, stop and drain only Radarr 1080p:
 
-3. Back up the live source, config, systemd units and database before installation:
+       sudo systemctl stop torr-arr-importer@radarr-1080.timer
+       while systemctl is-active --quiet torr-arr-importer@radarr-1080.service; do sleep 1; done
+
+   If the target host's current timer state differs, adjust the commands to that observed state. Do not stop/start unrelated instances or enable 4K profiles as part of this update.
+
+3. Back up the currently installed program, local configs, systemd units and the SQLite state before replacing the importer. Keep the backup under `/tmp` and retain its path:
 
        set -euo pipefail
-       BACKUP="$(mktemp -d /tmp/arr2torr-v1.1.0-backup.XXXXXX)"
+       BACKUP="$(mktemp -d /tmp/arr2torr-v1.3.3-backup.XXXXXX)"
        sudo install -d -m 0700 "$BACKUP"
        sudo cp -a /opt/torr-arr-importer/importer.py "$BACKUP/importer.py"
        sudo cp -a /etc/torr-arr-importer "$BACKUP/config"
@@ -67,29 +77,28 @@ The v1.2.0 source/test revision validated in GitHub Actions is commit `74ee8ac9a
        dst.close()
        src.close()
        PY
-       printf '%s\n' "$BACKUP" > /tmp/arr2torr-v1.2.0-backup-path
+       printf '%s\n' "$BACKUP" > /tmp/arr2torr-v1.3.3-backup-path
        echo "Backup saved under: $BACKUP"
 
-4. Add the opt-in Apprise settings described below to **only** `radarr-1080.toml` and `sonarr-1080.toml`. Leave existing API keys and all retry settings unchanged. Set `arr_ui_url` to the matching browser-facing base URL if you want best-effort item-card links; use an empty string to omit links.
+4. Replace only the importer program after the target timer is stopped. Do not run `install.sh` for this code-only update: the existing systemd units and TOML files should remain untouched:
 
-5. Install the staged files, without running any import yet:
-
-       SRC="$(cat /tmp/arr2torr-v1.2.0-source-path)"
-       sudo "$SRC/install.sh"
+       SRC="$(cat /tmp/arr2torr-v1.3.4-source-path)"
+       sudo install -o root -g root -m 0755 "$SRC/src/importer.py" /opt/torr-arr-importer/importer.py
        /opt/torr-arr-importer/importer.py --version
        sudo cmp "$SRC/src/importer.py" /opt/torr-arr-importer/importer.py
 
-6. Run dry-runs with the two existing profiles to validate TOML and API reachability. These commands do not add torrents:
+5. Run a read-only dry-run for each profile deliberately included in this upgrade. For the current MINI-Ubuntu validation scope, that is Radarr 1080p only. A dry-run does not send any Radarr blocklist action; it can initialize/migrate the database and baseline existing failed rows, so take the backup first:
 
        sudo -u torrimport /opt/torr-arr-importer/importer.py --config /etc/torr-arr-importer/radarr-1080.toml --dry-run
-       sudo -u torrimport /opt/torr-arr-importer/importer.py --config /etc/torr-arr-importer/sonarr-1080.toml --dry-run
 
-7. Start the same timers again and check the state. This starts the previously enabled 1080p timers; it does not enable new units:
+   Add a Sonarr dry-run only when Sonarr is intentionally included in the upgrade and its current configuration has been checked.
 
-       sudo systemctl start torr-arr-importer@radarr-1080.timer torr-arr-importer@sonarr-1080.timer
+6. After reviewing the dry-run output, start only the instance timers that were active before the update. For the current MINI-Ubuntu validation scope, start Radarr 1080p only:
+
+       sudo systemctl start torr-arr-importer@radarr-1080.timer
        systemctl list-timers 'torr-arr-importer@*' --all --no-pager
 
-If rollback is required, stop those timers and restore the backed-up `importer.py` and systemd unit files from the directory recorded in `/tmp/arr2torr-v1.2.0-backup-path`, then run `sudo systemctl daemon-reload` and start only the same two timers. Do **not** overwrite the live database with the old backup as a routine rollback step: the v1.2.0 schema additions are backward-compatible with v1.1.0, and restoring an old DB could discard importer state created since the backup.
+For rollback, stop only those timers, restore the backed-up `importer.py`, and start the same timers again. This code-only update does not change systemd units, so `daemon-reload` is not required. Do **not** restore an older SQLite backup as a routine rollback step: the additive schema column is backward-compatible, and overwriting the live DB could discard importer state created since the backup. Review saved config/unit backups separately only if they were deliberately changed.
 
 ## 2. Instance naming and profiles
 
@@ -150,7 +159,32 @@ For other instances, use the matching config/*.toml.example file.
 
 For the second Radarr/Sonarr profile, replace the base URL, API key, name, category and target-quality value with those belonging to that instance.
 
-## Optional Apprise notifications (v1.2.0)
+## Radarr and Sonarr terminal-failure blocklisting
+
+Every Radarr example TOML explicitly contains `radarr_blocklist_enabled = true`; every Sonarr example TOML explicitly contains `sonarr_blocklist_enabled = true`. Keep the matching flag explicit in each active config so the behavior is visible to an operator. The code defaults each missing flag to `true` for backward compatibility with older TOML files, but explicit configuration is recommended. Set the matching flag to `false` only to deliberately disable automatic blocklisting for that instance.
+
+The feature acts only on `pending_adds` rows in terminal status `failed` whose recorded attempt count has reached `max_add_attempts`. A permanent error before the configured attempt limit is not sufficient. Errors before the TorrServer add, such as a failed/expired Grab download URL, are excluded.
+
+Both applications expose the native `POST /api/v3/history/failed/{historyId}` route. The importer calls it for the specific Grab history entry, letting the corresponding Arr application run its native failure and blocklist pipeline (and any replacement search allowed by that application's settings).
+
+Explicit settings:
+
+    radarr_blocklist_enabled = true
+    sonarr_blocklist_enabled = true
+
+For the current MINI-Ubuntu Radarr 1080p profile, the Radarr flag was absent when checked, so add it to the live file with a privileged editor:
+
+    sudoedit /etc/torr-arr-importer/radarr-1080.toml
+
+Keep `radarr_blocklist_enabled = true` if automatic Radarr blocklisting is intended. Apply `sonarr_blocklist_enabled = true` explicitly to each active Sonarr profile only when its automatic blocklist behavior is intended. The v1.3.5 runtime has logged successful native blocklist actions for five failed Sonarr release choices; the [Roadmap](../ROADMAP.md) records the live validation. No systemd reload is needed for TOML changes; the importer reads its config at the beginning of each timer-triggered run.
+
+Radarr and Sonarr blocklist states are stored in separate columns in the shared SQLite database and migrated in place. On first migration for each feature, existing terminal failures are marked `legacy_skipped`, avoiding a retrospective batch of failed-history actions. New terminal failures are processed automatically. `--retry-failed` resets the corresponding state when a failed TorrServer attempt is deliberately re-armed.
+
+For ambiguous POST/network results, the importer does not blindly resend a failed-history action because it can trigger repeated side effects. On later runs it performs a read-only lookup (`/api/v3/blocklist/movie?movieId=...` for Radarr; `/api/v3/blocklist?seriesIds=...` for Sonarr) and compares source titles. Neither API provides the exact infohash in these lookup results, so this recovery evidence is not an exact-hash proof.
+
+The blocklist outcome is appended to the existing grouped terminal Apprise failure message, not sent separately. Structured log prefixes are `RADARR_BLOCKLIST_*` and `SONARR_BLOCKLIST_*`; when a flag is disabled or the failure occurred before the TorrServer add, blocklisting is not mentioned.
+
+## Optional Apprise notifications (terminal-only revision)
 
 Notifications are disabled by default and use the shared Apprise API, not a direct Telegram connection. Add the following flat TOML keys to each instance that should notify. Replace placeholders with values reachable from the Telegram client; do not add a bot token, chat ID or topic ID here.
 
@@ -167,11 +201,13 @@ Set `service_name` separately in each config, e.g. `arr2torr / Sonarr 1080p`; se
 
 The current deployed setup only has the 1080p Radarr and Sonarr timers active; keep 4K instance notifications disabled unless those instances are deliberately brought into service.
 
-Behavior:
-- A warning goes to `warnings` and contains only counts and add-attempt distribution for items awaiting automatic retry; it contains no names, hashes or item identifiers.
-- A final message goes to `critical` when an add/verification attempt becomes terminal or a permanent HTTP 4xx failure is encountered before the TorrServer add. Newly terminal items are grouped into as few messages as practical; each item includes its media title, release title when available, a sanitized cause, attempt information and an optional Arr card link.
-- The fingerprint for retry warnings and the one-time terminal-notification marker live in the shared SQLite database. Existing `failed` rows present before the v1.2.0 migration are baselined so an upgrade does not dump old failures into Telegram.
-- An Apprise outage is logged locally only; the importer does not fail solely because notification delivery failed and does not retry the same terminal alert indefinitely.
+Behavior in the terminal-only notification revision:
+- No Telegram message is sent while a TorrServer add is pending or waiting for an automatic retry; the user cannot act usefully until automatic attempts are exhausted.
+- A single grouped message goes to critical when add/verification becomes terminal or a permanent preparation error is encountered before the TorrServer add. Each item includes its media and selected-release titles, a plain-language cause, attempts used or permanent-error context, advice to choose another release, and the Arr card link when available.
+- If Seerr Watchlist is enabled, the same critical message states whether the media was added/already present or whether registration could not be confirmed. There is no second Seerr warning or separate retry-warning message.
+- The existing SQLite database stores notification attempt count and next retry time. A terminal event is marked delivered only after Apprise returns HTTP 2xx; failed deliveries retry with persisted delays capped at one hour.
+- Notification delivery errors are logged but do not change transfer state or cause recursive alerts. Because a timeout can follow successful acceptance by Apprise, retries are at-least-once and can rarely produce a duplicate.
+- The old notification_tag_warning config key remains accepted for compatibility but is not used to send user notifications.
 
 
 ## Optional Seerr Watchlist integration (v1.3.0)
@@ -192,10 +228,7 @@ Both files should keep `seerr_watchlist_enabled = false` until the real API key 
 
 When enabled, the importer selects only terminal `failed` rows for the current Arr instance and adds their existing TMDb IDs to `POST /api/v1/watchlist`. Series are registered as a whole title. Missing IDs are reported rather than looked up externally. The feature does not create a Seerr media request, intentionally alter Arr monitoring, or initiate a second Arr search.
 
-Notifications reuse the existing Apprise config:
-- After a failure is represented in Watchlist (including a duplicate whose presence is verified), send type `warning` to tag `warnings`. Explain that TorrServer transfer failed and the item is listed in the administrator's Seerr Watchlist for manual investigation; this is not a media-available notice.
-- If registration itself fails, send type `failure` to tag `critical`.
-- Watchlist state and notification fingerprints are stored in the existing SQLite database. API/network errors can retry on later timer runs; unchanged error alerts are deduplicated.
+Notifications reuse the existing Apprise config. Watchlist processing does not emit a separate message: its latest status is included in the one terminal critical transfer-failure alert. Confirmed registration is described naturally as media added to the administrator's Seerr Watchlist; if the entry was already there, the message says so. If registration cannot be confirmed, that problem is stated instead, and retryable Seerr API errors remain eligible for later timer runs.
 
 ### Safe activation sequence
 
