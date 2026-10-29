@@ -47,12 +47,12 @@ The v1.3.2 schema migration remains in place; v1.3.3 does not reset the database
 
    The expected version output is `1.3.3`; confirm the current CI run is green on Python 3.11 and 3.12 before deployment. Use this path only after the candidate has been approved for live validation/deployment.
 
-2. Stop only the two 1080p timers previously observed active on MINI-Ubuntu, then wait for their oneshot services to finish. Do not enable either 4K timer:
+2. Inspect the live timer state first. Stop only the profile timers that are active and are actually being upgraded. On MINI-Ubuntu at the 2026-10-29 check, `radarr-1080` was active and `sonarr-1080` was inactive; no active 4K timer was reported. For that host, stop and drain only Radarr 1080p:
 
-       sudo systemctl stop torr-arr-importer@radarr-1080.timer torr-arr-importer@sonarr-1080.timer
-       while systemctl is-active --quiet torr-arr-importer@radarr-1080.service || systemctl is-active --quiet torr-arr-importer@sonarr-1080.service; do sleep 1; done
+       sudo systemctl stop torr-arr-importer@radarr-1080.timer
+       while systemctl is-active --quiet torr-arr-importer@radarr-1080.service; do sleep 1; done
 
-   If the live timer state has changed, inspect it first and stop only the intended instances.
+   If the target host's current timer state differs, adjust the commands to that observed state. Do not stop/start unrelated instances or enable 4K profiles as part of this update.
 
 3. Back up the currently installed program, local configs, systemd units and the SQLite state before running the installer. Keep the backup under `/tmp` and retain its path:
 
@@ -84,14 +84,15 @@ The v1.3.2 schema migration remains in place; v1.3.3 does not reset the database
        /opt/torr-arr-importer/importer.py --version
        sudo cmp "$SRC/src/importer.py" /opt/torr-arr-importer/importer.py
 
-5. Run read-only dry-runs for the two intended profiles. A dry-run does not send any Radarr blocklist action; it does initialize/migrate the database and baseline existing failed rows, so take the backup first:
+5. Run a read-only dry-run for each profile deliberately included in this upgrade. For the current MINI-Ubuntu validation scope, that is Radarr 1080p only. A dry-run does not send any Radarr blocklist action; it can initialize/migrate the database and baseline existing failed rows, so take the backup first:
 
        sudo -u torrimport /opt/torr-arr-importer/importer.py --config /etc/torr-arr-importer/radarr-1080.toml --dry-run
-       sudo -u torrimport /opt/torr-arr-importer/importer.py --config /etc/torr-arr-importer/sonarr-1080.toml --dry-run
 
-6. After reviewing the dry-run output, start only the same timers that were previously active:
+   Add a Sonarr dry-run only when Sonarr is intentionally included in the upgrade and its current configuration has been checked.
 
-       sudo systemctl start torr-arr-importer@radarr-1080.timer torr-arr-importer@sonarr-1080.timer
+6. After reviewing the dry-run output, start only the instance timers that were active before the update. For the current MINI-Ubuntu validation scope, start Radarr 1080p only:
+
+       sudo systemctl start torr-arr-importer@radarr-1080.timer
        systemctl list-timers 'torr-arr-importer@*' --all --no-pager
 
 For rollback, stop only those timers and restore the backed-up `importer.py` and unit files, then run `sudo systemctl daemon-reload` and start the same timers again. Do **not** restore an older SQLite backup as a routine rollback step: the added columns are backward-compatible, and overwriting the live DB could discard importer state created since the backup. Review the saved config backup separately if any configuration was changed.

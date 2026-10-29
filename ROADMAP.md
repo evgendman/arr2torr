@@ -11,7 +11,6 @@ This document separates the installed torr-arr-importer revision, observed live 
 - **Still open:** select a release that remains absent from TorrServer's list after all three configured add/verification attempts. Verify that the importer reaches terminal failure, Radarr's native failed-history pipeline actually records the release in its blocklist, and the single grouped critical Apprise message reports the outcome and delivery state. Until that controlled case passes, live blocklist behavior is **not validated**.
 
 ## Implemented
-## Implemented
 
 - One standard-library Python implementation for both Radarr and Sonarr.
 - One systemd service/timer instance per configured Arr instance.
@@ -33,7 +32,7 @@ This document separates the installed torr-arr-importer revision, observed live 
 - Radarr-only native blocklist handling after the configured add/verification attempt limit is exhausted.
 - Stale pending-row cleanup when the hash is already in successful import history, and re-arming after a strictly newer Grab for the same hash.
 
-## Validated so far
+## Earlier validation records (historical)
 
 - **Radarr live path (2026-10-22):** newly grabbed films were discovered on timer runs and added to TorrServer. Successful imports were confirmed by observable file metadata (`file-stats`); later ordinary runs skipped already-present or previously handled hashes. A larger batch also exercised the verification timeout and bounded retry paths.
 - **Sonarr live path (2026-10-22):** new Sonarr Grab records were discovered and processed under category `tv`. Several new series releases were accepted and confirmed by `file-stats`. One item remained absent from TorrServer's list beyond the 120-second verification deadline on repeated attempts, so it stayed in bounded retry state; this is a release-level verification failure, not a failure of the Sonarr integration path as a whole.
