@@ -90,11 +90,13 @@ Terminal notification state is stored in the existing SQLite database and is mig
 
 ## Automatic Radarr blocklist after terminal transfer failure (introduced in v1.3.2; retained in v1.3.4 candidate)
 
-The Radarr-only setting radarr_blocklist_enabled defaults to true, including when it is omitted from an existing TOML file. Once a release reaches terminal TorrServer add/verification failure after all configured attempts, arr2torr calls Radarr's native POST /api/v3/history/failed/{historyId} endpoint for that Grab history record. Radarr then handles the failure and blocklist through its own supported pipeline; this can allow replacement searching according to Radarr's own settings.
+Every Radarr example TOML explicitly sets `radarr_blocklist_enabled = true`. Add the same line to each active Radarr config so the policy is clear without needing to inspect importer code. The code's `true` default when the key is missing is retained only for backward compatibility with older configs; explicit configuration is recommended.
+
+Once a release reaches terminal TorrServer add/verification failure after all configured attempts, arr2torr calls Radarr's native POST /api/v3/history/failed/{historyId} endpoint for that Grab history record. Radarr then handles the failure and blocklist through its own supported pipeline; this can allow replacement searching according to Radarr's own settings.
 
 - Intermediate failures waiting for retry are not blocklisted.
 - Errors before the TorrServer add (such as an expired Grab download URL) are not treated as dead TorrServer releases.
-- Sonarr behavior is unchanged. Set radarr_blocklist_enabled = false to disable the feature for a Radarr instance.
+- Sonarr behavior is unchanged. Set `radarr_blocklist_enabled = false` only to deliberately disable the feature for a Radarr instance.
 - Blocklist state is saved in the existing SQLite database. When upgrading a database, terminal failures that already existed are marked as pre-upgrade and are not sent to Radarr retroactively; only new terminal failures are processed automatically.
 - The result is appended to the existing grouped terminal Apprise message, when notifications are enabled, and is recorded in logs (RADARR_BLOCKLIST_BLOCKED, RADARR_BLOCKLIST_VERIFY_PENDING, RADARR_BLOCKLIST_ALREADY_PRESENT, RADARR_BLOCKLIST_FAILED, or RADARR_BLOCKLIST_SKIPPED). It does not create a separate blocklist-only notification.
 - A successful API response is treated as confirmation from Radarr's native failure pipeline. If the HTTP outcome is ambiguous, the importer checks Radarr's movie blocklist on later runs and does not blindly repeat the non-idempotent failed-history request. Radarr's public blocklist resource does not expose the torrent infohash, so recovery can only match the source release title and reports that limitation honestly.
