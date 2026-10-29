@@ -1819,7 +1819,10 @@ def terminal_notification_block(cfg: Config, row: dict[str, Any], *, preparation
             row.get(f"{state_prefix}_blocklist_last_error") or "", 120
         )
         if blocklist_status == "blocked":
-            lines.append(f"Блок-лист {blocklist_label}: команда принята; {blocklist_label} сможет исключить эту раздачу при дальнейшем поиске.")
+            if cfg.arr_type == "radarr":
+                lines.append("Блок-лист Radarr: релиз добавлен; Radarr сможет исключить эту раздачу при дальнейшем поиске.")
+            else:
+                lines.append("Блок-лист Sonarr: команда принята; Sonarr сможет исключить эту раздачу при дальнейшем поиске.")
         elif blocklist_status == "already_present":
             lines.append(f"Блок-лист {blocklist_label}: запись с таким названием релиза уже найдена; точный infohash через API подтвердить нельзя.")
         elif blocklist_status in {"request_started", "verify_pending", "retry"}:
