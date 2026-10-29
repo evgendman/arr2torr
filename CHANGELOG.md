@@ -1,5 +1,15 @@
 # Changelog
 
+## torr-arr-importer v1.3.4 (FileStats verification candidate; PR #4 remains open)
+
+- Require a usable, non-empty TorrServer `FileStats` list for the exact infohash before confirming a successful import. Validate positive unique file IDs and unique safe relative paths.
+- Treat the add response and `action=list` hash membership as intermediate signals only; `Torrent added`, `Torrent getting info`, `Torrent working` and `Torrent in db` are not sufficient success evidence by themselves.
+- Inspect present-but-incomplete live torrents via `action=get` without blindly resending `action=add`. For DB-only records, allow bounded metadata activation no more than once per verification attempt, then continue polling for usable `FileStats`.
+- Keep absent-hash retries separate from present-but-incomplete metadata recovery. Add a SQLite marker for metadata activation and migrate it in place; do not reset existing import history or deployment state.
+- Add regression coverage for malformed/missing `FileStats`, delayed readiness, DB-only activation, live incomplete hashes, absent-versus-present retry handling, and `action=get` HTTP 404 behavior.
+- GitHub Actions [run #98](https://github.com/evgendman/arr2torr/actions/runs/40830430598) passed on Python 3.11 and 3.12 (48 unit tests, compile step and version check).
+- This is a code candidate on PR #4, not a tagged release or live deployment. MINI-Ubuntu remains on v1.3.3 until separately authorized and live-validated.
+
 ## torr-arr-importer v1.3.3 (installed from PR #4 branch for controlled live validation; PR remains open)
 
 - Treat exact infohash membership in TorrServer's list as successful addition; remove the readiness-metadata requirement while retaining the requirement for a post-add list observation.
