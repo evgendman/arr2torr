@@ -159,13 +159,13 @@ For the second Radarr/Sonarr profile, replace the base URL, API key, name, categ
 
 ## Radarr terminal-failure blocklisting (v1.3.2)
 
-The setting radarr_blocklist_enabled defaults to true for Radarr profiles, including when it is absent from an existing configuration. The importer invokes Radarr's native POST /api/v3/history/failed/{historyId} action only when a TorrServer add/verification attempt becomes terminal and pending_adds.attempt_count is at least max_add_attempts. A permanent API rejection at a lower attempt count is not sufficient. This lets Radarr use its normal failed-download and blocklist logic, including replacement search if enabled in Radarr.
+Every Radarr example configuration explicitly contains `radarr_blocklist_enabled = true`. Keep this setting explicit in each active Radarr TOML file so the operational policy is visible to anyone reviewing the config; do not rely on the code's fallback. The code still defaults a missing value to `true` only for backward compatibility with older configs. The importer invokes Radarr's native POST /api/v3/history/failed/{historyId} action only when a TorrServer add/verification attempt becomes terminal and pending_adds.attempt_count is at least max_add_attempts. A permanent API rejection at a lower attempt count is not sufficient. This lets Radarr use its normal failed-download and blocklist logic, including replacement search if enabled in Radarr.
 
-Add this line explicitly to a Radarr config if you prefer the behavior to be visible in the file:
+Explicit setting for every Radarr profile:
 
     radarr_blocklist_enabled = true
 
-Set it to false to disable it. It has no effect in Sonarr profiles. Retries still run as configured; intermediate failures and permanent errors before an add is sent to TorrServer are not blocklisted.
+Set it to `false` only when you deliberately want to disable automatic blocklisting for that Radarr instance. This parameter has no effect in Sonarr profiles. Retries still run as configured; intermediate failures and permanent errors before an add is sent to TorrServer are not blocklisted.
 
 The SQLite migration is in-place. Failed rows that already existed before the new column was added are marked legacy_skipped, so upgrading does not send a large batch of historical failures to Radarr. New terminal failures are handled automatically. --retry-failed resets this state when an exhausted TorrServer attempt is deliberately re-armed.
 
