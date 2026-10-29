@@ -63,6 +63,8 @@ def make_config(root):
         verification_poll_interval_sec=0.2,
         retry_backoff_sec=1,
         max_add_attempts=3,
+        radarr_blocklist_enabled=True,
+        sonarr_blocklist_enabled=True,
     )
 
 
@@ -1062,6 +1064,7 @@ class RadarrBlocklistTests(unittest.TestCase):
             cfg = importer.replace(
                 cfg, name=name, arr_type="sonarr", category="tv",
                 radarr_blocklist_enabled=True,
+                sonarr_blocklist_enabled=True,
             ).normalized()
         db = importer.StateDB(cfg.state_db)
         grab = make_grab(HASH1, 73, "Blocklist.Test.Release.1080p.WEB-DL")
@@ -1309,6 +1312,140 @@ state_db = "{Path(tmp) / 'state.db'}"
                 )
             finally:
                 db.close()
+
+
+
+class SonarrBlocklistTests(unittest.TestCase):
+    def make_failed(self, root):
+        cfg = importer.replace(
+            make_config(root),
+            name="sonarr-1080", arr_type="sonarr", category="tv",
+            arr_url="http://127.0.0.1:8989", max_add_attempts=1,
+            radarr_blocklist_enabled=False, sonarr_blocklist_enabled=True,
+        ).normalized()
+        db = importer.StateDB(cfg.state_db)
+        grab = importer.replace(
+            make_grab(HASH1, 73, "Blocklist.Test.Release.S01E01.1080p.WEB-DL"),
+            movie_id=None, series_id=196,
+        )
+        media = {"title": "Blocklist Test Series", "titleSlug": "blocklist-test-series"}
+        db.begin_pending(grab, cfg.name, media, cfg.verification_timeout_sec)
+        self.assertEqual(
+            db.fail_pending(HASH1, "TorrServer metadata timeout",
+                            cfg.max_add_attempts, cfg.retry_backoff_sec),
+            "failed",
+        )
+        return cfg, db
+
+    def fake_arr(self, responses):
+        calls = []
+        class FakeArr:
+            def request_json(_self, method, url, payload=None, api_key=False,
+                             retry_count=0, retry_delay=1.0):
+                calls.append({"method":method,"url":url,"payload":payload,
+                              "api_key":api_key,"retry_count":retry_count,
+                              "retry_delay":retry_delay})
+                if not responses:
+                    raise AssertionError(f"Unexpected Arr API call: {method} {url}")
+                value=responses.pop(0)
+                if isinstance(value, Exception):
+                    raise value
+                return value
+        return FakeArr(), calls
+
+    def test_sonarr_blocklist_is_enabled_by_default(self):
+        cfg=importer.replace(make_config(Path("/tmp")),name="sonarr-1080",
+                             arr_type="sonarr",category="tv").normalized()
+        self.assertTrue(cfg.sonarr_blocklist_enabled)
+
+    def test_sonarr_toml_omission_defaults_blocklisting_to_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path=Path(tmp)/"sonarr.toml"
+            config_path.write_text(
+                f"""
+name = "sonarr-1080"
+arr_type = "sonarr"
+arr_url = "http://127.0.0.1:8989"
+arr_api_key = "test-key"
+torrserver_url = "http://127.0.0.1:8092"
+category = "tv"
+target_quality = 1080
+state_db = "{Path(tmp) / 'state.db'}"
+""",encoding="utf-8")
+            self.assertTrue(importer.config_from_file(str(config_path)).sonarr_blocklist_enabled)
+
+    def test_terminal_failure_uses_native_sonarr_failed_history_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg,db=self.make_failed(Path(tmp)); arr,calls=self.fake_arr([None])
+            try:
+                importer.process_sonarr_blocklist(cfg,arr,db)
+                self.assertEqual(len(calls),1)
+                self.assertEqual(calls[0]["method"],"POST")
+                self.assertTrue(calls[0]["url"].endswith("/api/v3/history/failed/73"))
+                self.assertTrue(calls[0]["api_key"]); self.assertEqual(calls[0]["retry_count"],0)
+                row=db.pending_rows(cfg.name)[0]
+                self.assertEqual(row["sonarr_blocklist_status"],"blocked")
+                self.assertEqual(row["sonarr_blocklist_verify_misses"],0)
+                self.assertIsNone(row["radarr_blocklist_status"])
+            finally: db.close()
+
+    def test_ambiguous_sonarr_request_is_verified_without_resending_post(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg,db=self.make_failed(Path(tmp))
+            db.set_sonarr_blocklist_state(HASH1,"verify_pending",
+                                          error="connection closed after request",verify_misses=0)
+            title=db.pending_rows(cfg.name)[0]["title"]
+            arr,calls=self.fake_arr([{"page":1,"pageSize":1000,"totalRecords":1,
+                "records":[{"id":444,"seriesId":196,"sourceTitle":title}]}])
+            try:
+                importer.process_sonarr_blocklist(cfg,arr,db)
+                self.assertEqual(len(calls),1); self.assertEqual(calls[0]["method"],"GET")
+                self.assertIn("/api/v3/blocklist?",calls[0]["url"])
+                self.assertIn("seriesIds=196",calls[0]["url"])
+                row=db.pending_rows(cfg.name)[0]
+                self.assertEqual(row["sonarr_blocklist_status"],"already_present")
+                self.assertEqual(row["sonarr_blocklist_verify_misses"],0)
+            finally: db.close()
+
+    def test_ambiguous_sonarr_post_is_not_repeated_and_fails_after_three_empty_checks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg,db=self.make_failed(Path(tmp))
+            db.set_sonarr_blocklist_state(HASH1,"verify_pending",
+                                          error="HTTP 502 after request",verify_misses=0)
+            arr,calls=self.fake_arr([{"records":[]},{"records":[]},{"records":[]}])
+            try:
+                for _ in range(3): importer.process_sonarr_blocklist(cfg,arr,db)
+                self.assertEqual([call["method"] for call in calls],["GET","GET","GET"])
+                row=db.pending_rows(cfg.name)[0]
+                self.assertEqual(row["sonarr_blocklist_status"],"failed")
+                self.assertEqual(row["sonarr_blocklist_verify_misses"],3)
+                self.assertIn("was ambiguous",row["sonarr_blocklist_last_error"])
+            finally: db.close()
+
+    def test_disabled_sonarr_blocklist_makes_no_api_calls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg,db=self.make_failed(Path(tmp))
+            disabled=importer.replace(cfg,sonarr_blocklist_enabled=False).normalized()
+            arr,calls=self.fake_arr([])
+            try:
+                importer.process_sonarr_blocklist(disabled,arr,db)
+                self.assertEqual(calls,[])
+                self.assertIsNone(db.pending_rows(cfg.name)[0]["sonarr_blocklist_status"])
+            finally: db.close()
+
+    def test_sonarr_terminal_notification_uses_sonarr_state_and_setting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg,db=self.make_failed(Path(tmp))
+            try:
+                row=db.pending_rows(cfg.name)[0]; row["sonarr_blocklist_status"]="blocked"
+                message=importer.terminal_notification_block(cfg,row)
+                self.assertIn("Блок-лист Sonarr: команда принята",message)
+                self.assertNotIn("Блок-лист Radarr",message)
+                disabled=importer.replace(cfg,sonarr_blocklist_enabled=False).normalized()
+                self.assertNotIn("Блок-лист Sonarr",importer.terminal_notification_block(disabled,row))
+                self.assertNotIn("Блок-лист Sonarr",
+                    importer.terminal_notification_block(cfg,row,preparation=True))
+            finally: db.close()
 
 
 class NotificationTests(unittest.TestCase):
