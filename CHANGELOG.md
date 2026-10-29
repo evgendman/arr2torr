@@ -1,14 +1,17 @@
 # Changelog
 
-## torr-arr-importer v1.3.4 (FileStats verification candidate; PR #4 remains open)
+## torr-arr-importer v1.3.4 (installed on MINI-Ubuntu; PR #4 not yet merged/tagged)
 
 - Require a usable, non-empty TorrServer `FileStats` list for the exact infohash before confirming a successful import. Validate positive unique file IDs and unique safe relative paths.
 - Treat the add response and `action=list` hash membership as intermediate signals only; `Torrent added`, `Torrent getting info`, `Torrent working` and `Torrent in db` are not sufficient success evidence by themselves.
 - Inspect present-but-incomplete live torrents via `action=get` without blindly resending `action=add`. For DB-only records, allow bounded metadata activation no more than once per verification attempt, then continue polling for usable `FileStats`.
 - Keep absent-hash retries separate from present-but-incomplete metadata recovery. Add a SQLite marker for metadata activation and migrate it in place; do not reset existing import history or deployment state.
 - Add regression coverage for malformed/missing `FileStats`, delayed readiness, DB-only activation, live incomplete hashes, absent-versus-present retry handling, and `action=get` HTTP 404 behavior.
-- GitHub Actions [run #114](https://github.com/evgendman/arr2torr/actions/runs/40833317871) passed on Python 3.11 and 3.12 (49 unit tests, compile step and version check; reported version `1.3.4`).
-- This is a code candidate on PR #4, not a tagged release or live deployment. MINI-Ubuntu remains on v1.3.3 until separately authorized and live-validated.
+- GitHub Actions [run #117](https://github.com/evgendman/arr2torr/actions/runs/40833440612) passed on Python 3.11 and 3.12 (49 unit tests, compile step and version check; reported version `1.3.4`). The code and tests are unchanged from the source pin installed on MINI-Ubuntu.
+- **Live verification on MINI-Ubuntu (2026-10-29):** the installed program reports `1.3.4`; SHA-256 `cb10e78ab5f9e94d36af5cb77622ad86601a505bb1410f85bbe458d3dd82c3f4` matches source commit `78ba4801e5e1fc3cfdc4cb620e2e55853e61573c`. Twenty new/replacement additions were observed reaching `ADDED verification=usable-file-stats`.
+- Six terminally failed release choices reached Radarr's native failed-history action and logged `RADARR_BLOCKLIST_BLOCKED`. The two grouped critical Apprise sends were acknowledged with HTTP 200, for batches of two and four items. Five alternate releases subsequently passed `FileStats` verification; the *Sausage Party* HDRip alternative remained under retry at the last fully observed log point.
+- The existing SQLite history was retained. The 32 historical rows accepted by v1.3.3's weaker list-only criterion have not been automatically reclassified.
+- **Publication state:** PR #4 remains open and unmerged; no v1.3.4 Git tag or GitHub release is published. The installed runtime/source version is confirmed as v1.3.4, but it is not yet an official tagged release.
 
 ## torr-arr-importer v1.3.3 (installed from PR #4 branch for controlled live validation; PR remains open)
 
