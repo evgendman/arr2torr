@@ -46,7 +46,7 @@ The v1.3.4 candidate adds `metadata_activation_attempt` to `pending_adds` throug
        python3 "$SRC/src/importer.py" --version
        printf '%s\n' "$SRC" > /tmp/arr2torr-v1.3.4-source-path
 
-   The expected version output is `1.3.4`. This pinned source tree is the candidate checked by GitHub Actions run [#111](https://github.com/evgendman/arr2torr/actions/runs/40833149341); confirm that run finishes green on Python 3.11 and 3.12 before deployment. Continue only after separately approving live validation/deployment.
+   The expected version output is `1.3.4`. This pinned source tree passed GitHub Actions [run #111](https://github.com/evgendman/arr2torr/actions/runs/40833149341) on Python 3.11 and 3.12 with 49 tests. Continue only after separately approving live validation/deployment.
 
 2. Inspect the live timer state first. Stop only the profile timers that are active and are actually being upgraded. On MINI-Ubuntu at the 2026-10-29 check, `radarr-1080` was active and `sonarr-1080` was inactive; no active 4K timer was reported. For that host, stop and drain only Radarr 1080p:
 
