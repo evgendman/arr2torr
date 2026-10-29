@@ -4,7 +4,7 @@
 
 arr2torr is the project and documentation home for **torr-arr-importer**, a polling service that transfers releases selected with **Grab** in Radarr or Sonarr directly to the TorrServer API. It is intended for a media workflow where the user wants to start streaming from TorrServer, then expose those streams to a media library through STRM files or another integration.
 
-The current code candidate described here is **torr-arr-importer v1.3.4** (PR #4; not yet deployed to MINI-Ubuntu).
+The installed runtime/source version verified on MINI-Ubuntu on 2026-10-29 is **torr-arr-importer v1.3.4**. PR #4 remains open, so this is not yet an official tagged GitHub release.
 
 ## Why this exists
 
@@ -72,7 +72,7 @@ With the usual five-minute timer, a successfully grabbed release is normally tra
 
 TorrServer may acknowledge an add request before its background metadata acquisition completes. An expected hash in the initial response is therefore not treated as final success.
 
-The importer persists a pending attempt before the add request, submits eligible releases first, then polls TorrServer at a configurable interval. Every pending hash has its own deadline. In the v1.3.4 candidate, the exact hash must expose a non-empty, usable `FileStats` list before it is recorded as a successful import. Entries need positive unique file IDs and unique safe relative paths. If a hash is present but incomplete, the importer inspects the live object with `action=get` rather than blindly sending another add; a DB-only `Torrent in db` record gets a bounded metadata-activation request before polling continues. The immediate response and list membership are not final success.
+The importer persists a pending attempt before the add request, submits eligible releases first, then polls TorrServer at a configurable interval. Every pending hash has its own deadline. In v1.3.4, the exact hash must expose a non-empty, usable `FileStats` list before it is recorded as a successful import. Entries need positive unique file IDs and unique safe relative paths. If a hash is present but incomplete, the importer inspects the live object with `action=get` rather than blindly sending another add; a DB-only `Torrent in db` record gets a bounded metadata-activation request before polling continues. The immediate response and list membership are not final success.
 
 Pending attempts live in the shared SQLite table pending_adds and do not contain the credential-bearing download URL. After a process restart, they are reconciled against TorrServer before retrying. Failures use bounded exponential backoff and stop automatically after the configured attempt limit; --retry-failed explicitly re-queues exhausted, never-confirmed attempts for the selected Arr instance.
 
@@ -207,8 +207,10 @@ The current code candidate is **torr-arr-importer v1.3.4**. It uses Python 3.11+
 
 ## Current status
 
-MINI-Ubuntu remains on `torr-arr-importer 1.3.3` from PR #4 branch `feature/radarr-blocklist-v1.3.2`, commit `7e8feb7`. The v1.3.4 code candidate and regression tests are on that still-open PR; this preparation did not change the host, its TOML configuration, SQLite state or systemd units. No tagged release or live TorrServer validation is claimed.
+MINI-Ubuntu is running `torr-arr-importer 1.3.4`. The installed file SHA-256 is `cb10e78ab5f9e94d36af5cb77622ad86601a505bb1410f85bbe458d3dd82c3f4`, matching the tested source pin `78ba4801e5e1fc3cfdc4cb620e2e55853e61573c`. The code-only upgrade preserved configuration, SQLite history and systemd unit files. GitHub Actions [run #117](https://github.com/evgendman/arr2torr/actions/runs/40833440612) passed on Python 3.11 and 3.12 with 49 tests. PR #4 is still open/unmerged and there is no official v1.3.4 tag/release, so the installed version is verified but not yet formally published.
 
-During the 10-hour journal window ending 2026-10-29 09:45 (+05:00), the Radarr service completed 115 runs. It submitted 79 add requests, and all 79 were confirmed by exact hash membership in a subsequent TorrServer list response. This is historical evidence under the v1.3.3 criterion only; it is not evidence that all 79 had usable `FileStats`. There were zero logged failed additions and no importer `ERROR`/exception events in that window.
+The historical 10-hour window ending 2026-10-29 09:45 (+05:00) was collected under v1.3.3's weaker list-membership criterion: 115 runs and 79 add requests were followed by exact hash membership, but this did not prove usable file metadata. That finding prompted the v1.3.4 stricter criterion.
 
-The zero-seed `Viking Quest (2014) BDRip 720p | P2` release was accepted and appeared in TorrServer's list on the first attempt. The v1.3.4 candidate requires valid `FileStats`, but still needs live validation on MINI-Ubuntu. The remaining live tests are (1) a release that becomes FileStats-ready and is processed by `torr2strm`, and (2) a release that never obtains usable `FileStats` across all three attempts, followed by verification of Radarr's native blocklist entry and the grouped critical Apprise notification. See [Roadmap and validation status](ROADMAP.md).
+Live results on 2026-10-29: 20 fresh/replacement additions reached `ADDED verification=usable-file-stats`. Six releases that remained unverified through the configured attempt limit were processed by Radarr's native failed-history path; logs confirmed `RADARR_BLOCKLIST_BLOCKED` for each. The grouped critical Apprise notifications were acknowledged with HTTP 200 (two messages, covering two and four items). Five alternative releases were later confirmed ready. The replacement `Sausage Party` HDRip 480p release was still retrying at the last fully observed journal point.
+
+Remaining work is to confirm a `FileStats`-verified release all the way through downstream `torr2strm`, cautiously reassess the 32 old v1.3.3 success rows without resetting SQLite/resurrecting deliberately removed hashes, and check the current `Sausage Party` alternative's final outcome. Some importer oneshot units report exit code 1 whenever verification failures occur in a cycle, while their timer remains active and continues scheduled retries; the operational meaning of that service status is documented in the roadmap. See [Roadmap and validation status](ROADMAP.md).
