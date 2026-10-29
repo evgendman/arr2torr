@@ -55,7 +55,7 @@ The successful integration tests do not imply that every torrent will become rea
 
 ## Historical deployment baseline and working version (2026-10-21; superseded by the 2026-10-22 live verification above)
 
-**Historical observation (2026-10-21):** the then-installed torr-arr-importer version and source declared v1.1.0, with checkout commit **7831553da914b147d65989699b34a84c3ce238e5** recorded at that time. This section and the checks below are retained as a historical record only; the current installed v1.3.3 revision and timer state are documented at the top of this roadmap.
+**Historical observation (2026-10-21):** the then-installed torr-arr-importer version and source declared v1.1.0, with checkout commit **7831553da914b147d65989699b34a84c3ce238e5** recorded at that time. This section and the checks below are retained as a historical record only; the current installed v1.3.4 runtime, live evidence and timer caveats are documented at the top of this roadmap.
 
 ~~~bash
 sudo /opt/torr-arr-importer/importer.py --version
