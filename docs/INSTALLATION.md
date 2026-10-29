@@ -167,7 +167,11 @@ Explicit setting for every Radarr profile:
 
     radarr_blocklist_enabled = true
 
-Set it to `false` only when you deliberately want to disable automatic blocklisting for that Radarr instance. This parameter has no effect in Sonarr profiles. Retries still run as configured; intermediate failures and permanent errors before an add is sent to TorrServer are not blocklisted.
+For the existing MINI-Ubuntu Radarr 1080p profile, this line was not present when the config was inspected. Add it to the live file with a privileged editor:
+
+    sudoedit /etc/torr-arr-importer/radarr-1080.toml
+
+Keep the setting as `true` to make the intended behavior explicit. No systemd reload is required; the importer reads the TOML file at the beginning of each timer-triggered run. Set it to `false` only when you deliberately want to disable automatic blocklisting for that Radarr instance. This parameter has no effect in Sonarr profiles. Retries still run as configured; intermediate failures and permanent errors before an add is sent to TorrServer are not blocklisted.
 
 The SQLite migration is in-place. Failed rows that already existed before the new column was added are marked legacy_skipped, so upgrading does not send a large batch of historical failures to Radarr. New terminal failures are handled automatically. --retry-failed resets this state when an exhausted TorrServer attempt is deliberately re-armed.
 
