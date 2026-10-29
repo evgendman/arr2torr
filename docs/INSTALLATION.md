@@ -159,23 +159,30 @@ For other instances, use the matching config/*.toml.example file.
 
 For the second Radarr/Sonarr profile, replace the base URL, API key, name, category and target-quality value with those belonging to that instance.
 
-## Radarr terminal-failure blocklisting (v1.3.2)
+## Radarr and Sonarr terminal-failure blocklisting
 
-Every Radarr example configuration explicitly contains `radarr_blocklist_enabled = true`. Keep this setting explicit in each active Radarr TOML file so the operational policy is visible to anyone reviewing the config; do not rely on the code's fallback. The code still defaults a missing value to `true` only for backward compatibility with older configs. The importer invokes Radarr's native POST /api/v3/history/failed/{historyId} action only when a TorrServer add/verification attempt becomes terminal and pending_adds.attempt_count is at least max_add_attempts. A permanent API rejection at a lower attempt count is not sufficient. This lets Radarr use its normal failed-download and blocklist logic, including replacement search if enabled in Radarr.
+Every Radarr example TOML explicitly contains `radarr_blocklist_enabled = true`; every Sonarr example TOML explicitly contains `sonarr_blocklist_enabled = true`. Keep the matching flag explicit in each active config so the behavior is visible to an operator. The code defaults each missing flag to `true` for backward compatibility with older TOML files, but explicit configuration is recommended. Set the matching flag to `false` only to deliberately disable automatic blocklisting for that instance.
 
-Explicit setting for every Radarr profile:
+The feature acts only on `pending_adds` rows in terminal status `failed` whose recorded attempt count has reached `max_add_attempts`. A permanent error before the configured attempt limit is not sufficient. Errors before the TorrServer add, such as a failed/expired Grab download URL, are excluded.
+
+Both applications expose the native `POST /api/v3/history/failed/{historyId}` route. The importer calls it for the specific Grab history entry, letting the corresponding Arr application run its native failure and blocklist pipeline (and any replacement search allowed by that application's settings).
+
+Explicit settings:
 
     radarr_blocklist_enabled = true
+    sonarr_blocklist_enabled = true
 
-For the existing MINI-Ubuntu Radarr 1080p profile, this line was not present when the config was inspected. Add it to the live file with a privileged editor:
+For the current MINI-Ubuntu Radarr 1080p profile, the Radarr flag was absent when checked, so add it to the live file with a privileged editor:
 
     sudoedit /etc/torr-arr-importer/radarr-1080.toml
 
-Keep the setting as `true` to make the intended behavior explicit. No systemd reload is required; the importer reads the TOML file at the beginning of each timer-triggered run. Set it to `false` only when you deliberately want to disable automatic blocklisting for that Radarr instance. This parameter has no effect in Sonarr profiles. Retries still run as configured; intermediate failures and permanent errors before an add is sent to TorrServer are not blocklisted.
+Keep `radarr_blocklist_enabled = true` if automatic Radarr blocklisting is intended. Apply `sonarr_blocklist_enabled = true` explicitly to each active Sonarr profile only when its automatic blocklist behavior is intended. The Sonarr extension in the v1.3.5 branch is not yet installed or live-validated; do not assume the flag has an effect in the currently installed v1.3.4 runtime. No systemd reload is needed for TOML changes; the importer reads its config at the beginning of each timer-triggered run.
 
-The SQLite migration is in-place. Failed rows that already existed before the new column was added are marked legacy_skipped, so upgrading does not send a large batch of historical failures to Radarr. New terminal failures are handled automatically. --retry-failed resets this state when an exhausted TorrServer attempt is deliberately re-armed.
+Radarr and Sonarr blocklist states are stored in separate columns in the shared SQLite database and migrated in place. On first migration for each feature, existing terminal failures are marked `legacy_skipped`, avoiding a retrospective batch of failed-history actions. New terminal failures are processed automatically. `--retry-failed` resets the corresponding state when a failed TorrServer attempt is deliberately re-armed.
 
-The final grouped Apprise failure message includes the actual blocklist outcome, and the service log records the detail. An ambiguous HTTP/network result is checked read-only on later timer runs rather than blindly resending Radarr's failed-history action, because that action can trigger duplicate side effects.
+For ambiguous POST/network results, the importer does not blindly resend a failed-history action because it can trigger repeated side effects. On later runs it performs a read-only lookup (`/api/v3/blocklist/movie?movieId=...` for Radarr; `/api/v3/blocklist?seriesIds=...` for Sonarr) and compares source titles. Neither API provides the exact infohash in these lookup results, so this recovery evidence is not an exact-hash proof.
+
+The blocklist outcome is appended to the existing grouped terminal Apprise failure message, not sent separately. Structured log prefixes are `RADARR_BLOCKLIST_*` and `SONARR_BLOCKLIST_*`; when a flag is disabled or the failure occurred before the TorrServer add, blocklisting is not mentioned.
 
 ## Optional Apprise notifications (terminal-only revision)
 

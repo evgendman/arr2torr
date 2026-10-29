@@ -4,7 +4,7 @@
 
 arr2torr is the project and documentation home for **torr-arr-importer**, a polling service that transfers releases selected with **Grab** in Radarr or Sonarr directly to the TorrServer API. It is intended for a media workflow where the user wants to start streaming from TorrServer, then expose those streams to a media library through STRM files or another integration.
 
-The installed runtime/source version verified on MINI-Ubuntu on 2026-10-29 is **torr-arr-importer v1.3.4**. PR #4 remains open, so this is not yet an official tagged GitHub release.
+The installed runtime on MINI-Ubuntu remains **torr-arr-importer v1.3.4**. PR #4 is being extended with a **v1.3.5 candidate** that adds Sonarr terminal-failure blocklisting; that candidate is not installed and is not an official tagged release.
 
 ## Why this exists
 
@@ -64,7 +64,7 @@ With the usual five-minute timer, a successfully grabbed release is normally tra
 - Submits candidates first and verifies the batch with one polling loop and per-hash deadlines rather than serially waiting for each add.
 - Retries unverified attempts with bounded exponential backoff and avoids resending hashes that are still pending on TorrServer.
 - Supports non-mutating --dry-run, deliberate --rebuild, and explicit --retry-failed for exhausted unverified attempts.
-- For Radarr, automatically sends terminal TorrServer add/verification failures to Radarr's native failed-download handling and blocklist once max_add_attempts is exhausted; enabled by default and configurable per Radarr instance.
+- For Radarr and Sonarr, can send terminal TorrServer add/verification failures to the respective native failed-download handling and blocklist once max_add_attempts is exhausted; independently configurable per instance.
 - Uses separate per-instance configuration and lock files, while sharing the import-history database.
 - Redacts API-key-like URL parameters from logs and exceptions.
 
@@ -88,18 +88,20 @@ The final message goes to the critical tag and brings the entire action-oriented
 
 Terminal notification state is stored in the existing SQLite database and is migrated in place. An unsuccessful Apprise request leaves the message pending and schedules another attempt with increasing delays (1, 5, 15, 30 and then 60 minutes, capped at one hour). A successful 2xx response marks the notification delivered. This is at-least-once delivery: if Apprise accepts a request but its response is lost, a retry can result in a duplicate. Delivery failures never change the TorrServer import result. Notifications remain disabled in example configs by default. See [Installation and configuration](docs/INSTALLATION.md) and [Operations](docs/OPERATIONS.md).
 
-## Automatic Radarr blocklist after terminal transfer failure (introduced in v1.3.2; retained in v1.3.4 candidate)
+## Automatic Radarr/Sonarr blocklisting after terminal transfer failure (v1.3.5 candidate)
 
-Every Radarr example TOML explicitly sets `radarr_blocklist_enabled = true`. Add the same line to each active Radarr config so the policy is clear without needing to inspect importer code. The code's `true` default when the key is missing is retained only for backward compatibility with older configs; explicit configuration is recommended.
+Every Radarr example TOML explicitly sets `radarr_blocklist_enabled = true`, and every Sonarr example TOML explicitly sets `sonarr_blocklist_enabled = true`. Keep the matching flag explicit in each active config so the policy is visible without inspecting importer code. Both flags default to `true` for backward compatibility with existing configs; set a flag to `false` only to deliberately disable blocklisting for that instance.
 
-Once a release reaches terminal TorrServer add/verification failure after all configured attempts, arr2torr calls Radarr's native POST /api/v3/history/failed/{historyId} endpoint for that Grab history record. Radarr then handles the failure and blocklist through its own supported pipeline; this can allow replacement searching according to Radarr's own settings.
+Once a release reaches terminal TorrServer add/verification failure after all configured attempts, arr2torr calls the corresponding Arr application's native `POST /api/v3/history/failed/{historyId}` endpoint for that exact Grab history record. Radarr and Sonarr then use their own failed-download and blocklist pipeline; replacement searching depends on each application's settings.
 
 - Intermediate failures waiting for retry are not blocklisted.
 - Errors before the TorrServer add (such as an expired Grab download URL) are not treated as dead TorrServer releases.
-- Sonarr behavior is unchanged. Set `radarr_blocklist_enabled = false` only to deliberately disable the feature for a Radarr instance.
-- Blocklist state is saved in the existing SQLite database. When upgrading a database, terminal failures that already existed are marked as pre-upgrade and are not sent to Radarr retroactively; only new terminal failures are processed automatically.
-- The result is appended to the existing grouped terminal Apprise message, when notifications are enabled, and is recorded in logs (RADARR_BLOCKLIST_BLOCKED, RADARR_BLOCKLIST_VERIFY_PENDING, RADARR_BLOCKLIST_ALREADY_PRESENT, RADARR_BLOCKLIST_FAILED, or RADARR_BLOCKLIST_SKIPPED). It does not create a separate blocklist-only notification.
-- A successful API response is treated as confirmation from Radarr's native failure pipeline. If the HTTP outcome is ambiguous, the importer checks Radarr's movie blocklist on later runs and does not blindly repeat the non-idempotent failed-history request. Radarr's public blocklist resource does not expose the torrent infohash, so recovery can only match the source release title and reports that limitation honestly.
+- Radarr and Sonarr have independent flags and independent persisted state. Sonarr's flag is `sonarr_blocklist_enabled`; Radarr's is `radarr_blocklist_enabled`.
+- State is saved in separate Radarr/Sonarr SQLite columns and migrated in place. Existing terminal failures are marked as pre-upgrade during the corresponding migration and are not sent to the Arr application retroactively.
+- Outcomes are appended to the existing grouped terminal Apprise message and recorded in logs (`RADARR_BLOCKLIST_*` or `SONARR_BLOCKLIST_*`). There is no separate blocklist-only notification.
+- If a failed-history request has an ambiguous HTTP/network result, the importer does not repeat the non-idempotent POST blindly. It checks the matching Arr blocklist on later runs and compares the release source title. Neither public blocklist resource exposes enough information to prove an exact infohash match in this recovery path.
+- The Radarr path was live-validated on MINI-Ubuntu on 2026-10-29. The v1.3.5 Sonarr extension is code/test candidate only and still requires CI and live validation against the deployed Sonarr version before installation.
+
 
 ## Seerr Watchlist for terminal transfer failures (v1.3.0)
 

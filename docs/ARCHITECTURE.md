@@ -1,6 +1,6 @@
 # Architecture and state model
 
-This document describes the v1.3.4 code candidate and its state model. The candidate preserves terminal-only notifications, durable Apprise-delivery retries and default-enabled Radarr blocklisting, but replaces list-membership confirmation with validation of usable `FileStats`. MINI-Ubuntu remains on v1.3.3; the candidate has passed GitHub Actions on Python 3.11/3.12 but has not been live-validated against TorrServer.
+This document describes the v1.3.5 code candidate and its state model. MINI-Ubuntu remains on v1.3.4; v1.3.5 is not installed or tagged. The candidate preserves usable-`FileStats` verification and adds independently configured Radarr/Sonarr native blocklisting with separate in-place SQLite state. Radarr has been live-validated, while Sonarr blocklisting still requires CI and host-specific live validation.
 
 ## 1. Source of truth
 

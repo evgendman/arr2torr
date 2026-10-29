@@ -1,5 +1,14 @@
 # Changelog
 
+## torr-arr-importer v1.3.5 candidate (Sonarr terminal-failure blocklisting; not installed or tagged)
+
+- Add explicit `sonarr_blocklist_enabled = true` to both Sonarr example TOMLs and parse the setting independently of Radarr's existing flag.
+- After a Sonarr release reaches terminal TorrServer add/verification failure and exhausts `max_add_attempts`, use Sonarr's native `POST /api/v3/history/failed/{historyId}` route. Preserve bounded TorrServer retries and exclude pre-add preparation errors.
+- Persist Sonarr blocklist state in dedicated SQLite columns, migrated in place; mark pre-upgrade failed Sonarr rows as `legacy_skipped`, and avoid resending a non-idempotent failed-history request after ambiguous outcomes.
+- Verify an ambiguous Sonarr action using `GET /api/v3/blocklist?seriesIds=...` and source-title matching; the public API does not prove an exact infohash match.
+- Add regression tests for enabled/disabled config, native endpoint use, separate state, paged blocklist parsing, ambiguous-response recovery and terminal notification wording.
+- **Validation state:** not installed on MINI-Ubuntu. CI and live validation against the currently deployed Sonarr version remain outstanding. Radarr's previously live-validated path is unchanged.
+
 ## torr-arr-importer v1.3.4 (installed on MINI-Ubuntu; PR #4 not yet merged/tagged)
 
 - Configuration convention: explicitly set `radarr_blocklist_enabled = true` in each active Radarr TOML. The code fallback to `true` when the key is absent remains only for backward compatibility; the setting is visible in both Radarr example configs. Sonarr configs do not use this Radarr-only setting.

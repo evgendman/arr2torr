@@ -64,27 +64,27 @@ Arr often focuses on the final chosen download in a conventional workflow. Howev
 
 That means different versions of one movie or series can coexist in TorrServer. The downstream library can expose each one as a distinct root with its own source identity and allow the viewer to choose.
 
-## Radarr blocklisting after terminal TorrServer failure (implemented and live-validated on MINI-Ubuntu, 2026-10-29)
+## Radarr/Sonarr blocklisting after terminal TorrServer failure
 
-Every Radarr example TOML explicitly sets `radarr_blocklist_enabled = true`; use the same explicit setting in each active Radarr config. The code default of `true` when this key is absent is a backward-compatibility fallback, not a substitute for a visible operational setting. Set `radarr_blocklist_enabled = false` only when intentionally disabling the feature. Sonarr profiles never execute this path.
+Radarr's native failed-history path is implemented and was live-validated on MINI-Ubuntu on 2026-10-29. Sonarr support is added in the v1.3.5 candidate branch but has not yet been installed or live-validated.
 
-The importer acts only on pending_adds rows whose TorrServer add/verification workflow reached status = 'failed' and whose recorded attempt_count is at least max_add_attempts. A permanent API rejection before that configured attempt limit is reached is not sufficient to blocklist the release. It calls Radarr's native POST /api/v3/history/failed/{arr_history_id} for that specific Grab history record. Radarr runs its normal failed-download pipeline to create the blocklist entry and can initiate a replacement search according to Radarr's settings. A retry_wait row is not blocklisted; preparation errors in terminal_events (for example, an expired download URL before the TorrServer add) are also excluded.
+Every Radarr example TOML explicitly sets `radarr_blocklist_enabled = true`; every Sonarr example TOML explicitly sets `sonarr_blocklist_enabled = true`. Use the matching explicit setting in each active profile. Missing keys default to `true` for backward compatibility, not as a replacement for visible operational configuration. Set the corresponding flag to `false` only when intentionally disabling that application's blocklist behavior.
+
+The importer acts only on `pending_adds` rows whose TorrServer workflow reached `status = 'failed'` and whose `attempt_count` is at least `max_add_attempts`. A permanent API rejection before that attempt limit is reached is not sufficient. Pre-add preparation failures (for example, an expired download URL) are excluded. The importer calls the corresponding application's native `POST /api/v3/history/failed/{arr_history_id}` endpoint; Arr runs its own failed-download and blocklist logic. Any replacement search follows that application's settings.
 
 Look for these log events:
 
-- RADARR_BLOCKLIST_BLOCKED: Radarr accepted the native failed-history action.
-- RADARR_BLOCKLIST_ALREADY_PRESENT: after an ambiguous request, a blocklist entry with the same source release title was found.
-- RADARR_BLOCKLIST_VERIFY_PENDING: the request outcome is ambiguous; the importer is performing read-only checks and does not resend the failed-history request.
-- RADARR_BLOCKLIST_FAILED: identity was missing, Radarr rejected the operation, or verification remained inconclusive after three successful checks.
-- RADARR_BLOCKLIST_SKIPPED: the setting is disabled, or a terminal row has fewer attempts than max_add_attempts. The latter reason is saved and explained in the terminal notification.
+- `RADARR_BLOCKLIST_BLOCKED` / `SONARR_BLOCKLIST_BLOCKED`: native failed-history action returned successfully.
+- `RADARR_BLOCKLIST_ALREADY_PRESENT` / `SONARR_BLOCKLIST_ALREADY_PRESENT`: after an ambiguous request, a blocklist entry with the same source release title was found.
+- `*_BLOCKLIST_VERIFY_PENDING`: the request outcome is ambiguous; the importer is performing read-only checks and does not resend the failed-history request.
+- `*_BLOCKLIST_FAILED`: the required identity is missing, Arr rejected the operation, or verification remained inconclusive after three successful checks.
+- `*_BLOCKLIST_SKIPPED`: the corresponding flag is disabled, or a terminal row has fewer attempts than `max_add_attempts`.
 
-Radarr's public BlocklistResource currently does not expose the torrent infohash. Therefore, recovery after an ambiguous response can match sourceTitle for that movie, but cannot independently prove that the matched entry has the same hash. The normal path does not use a fake POST /blocklist endpoint; it relies on Radarr's own history/failed API.
+For ambiguous-result recovery, Radarr looks up `/api/v3/blocklist/movie?movieId=...`; Sonarr uses its paged `/api/v3/blocklist?seriesIds=...` response and inspects its `records` array. Both compare the source release title because the public blocklist resources do not expose the torrent infohash; this is not exact-hash confirmation. The failed-history POST is not repeated automatically, to avoid duplicate side effects.
 
-The blocklist outcome is appended to the existing grouped terminal Apprise failure notification, not sent as a separate message. If Apprise is disabled, the result remains in the logs. The new state fields are migrated in-place in the shared SQLite database. Existing terminal failures found during the first migration are marked legacy_skipped to prevent retroactive mass blocklisting; new terminal failures are processed automatically. Deliberately re-arming an exhausted attempt with --retry-failed resets its blocklist state.
+Each application's status/error/verification counters are kept in separate SQLite columns and migrated in place. On first migration, pre-existing failed rows are marked `legacy_skipped`; do not reset the database. Explicitly re-arming an exhausted TorrServer attempt with `--retry-failed` resets that instance's state.
 
-**Live result (2026-10-29):** seven release choices remained unverified through the three-attempt limit and emitted `RADARR_BLOCKLIST_BLOCKED`: *Leaves of Grass* (2009), *Keeping the Faith* (2000), *The French Dispatch* (2021), *Motherless Brooklyn* (2019), *Isle of Dogs* (2018), and two *Sausage Party* (2016) releases (BDRip 480p and HDRip 480p). Three grouped critical notifications were acknowledged by Apprise with HTTP 200, covering two, four and one item. Radarr subsequently selected alternate releases for the first five affected films; those five alternatives reached `ADDED verification=usable-file-stats`. The `Sausage Party` HDRip alternative also exhausted three attempts and was blocklisted at 13:02:56; no replacement passing `FileStats` verification was present by the next completed run at 13:05:54.
-
-**Operational status detail:** in v1.3.4, the importer returns exit code 1 from a cycle when one or more verification failures are reported, even if those rows remain in `retry_wait` and the systemd timer is still active. This can mark the oneshot service as `failed` without stopping the timer or invalidating a separate `RADARR_BLOCKLIST_BLOCKED` result. Treat this as a distinct exit-status/observability issue.
+The blocklist outcome is appended to the existing grouped terminal Apprise failure notification, not sent as a separate message. If Apprise is disabled, the result remains in the service logs. Radarr's behavior is live-validated; Sonarr still requires CI and host-specific live validation before deployment.
 
 ## Seerr Watchlist tracking (v1.3.0)
 

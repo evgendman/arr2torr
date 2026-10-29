@@ -1486,7 +1486,7 @@ def process_radarr_blocklist(cfg: Config, arr: HttpClient, db: StateDB) -> None:
 
 def process_sonarr_blocklist(cfg: Config, arr: HttpClient, db: StateDB) -> None:
     """Use Sonarr's native failed-history action to blocklist terminally failed grabs."""
-    if cfg.arr_type != "radarr":
+    if cfg.arr_type != "sonarr":
         return
     if not cfg.sonarr_blocklist_enabled:
         logging.info("SONARR_BLOCKLIST_SKIPPED source=%s reason=disabled", cfg.name)
