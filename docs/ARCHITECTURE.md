@@ -1,6 +1,6 @@
 # Architecture and state model
 
-This document describes the proposed combined torr-arr-importer v1.3.3 behavior and data mapping. It preserves the terminal-only notification and durable Apprise-delivery behavior present in the installed code, and adds default-enabled Radarr blocklisting after the configured TorrServer add/verification attempt limit is exhausted. The combined candidate is not yet deployed or live-validated for Radarr blocklisting.
+This document describes the installed torr-arr-importer v1.3.3 code and data mapping. It preserves terminal-only notifications and durable Apprise-delivery retries, confirms successful adds by observing exact infohash membership in TorrServer's subsequent action=list response, and implements default-enabled Radarr blocklisting after terminal add/verification failure. Ordinary live adds have been validated on MINI-Ubuntu; the real terminal-failure-to-blocklist path remains unverified.
 
 ## 1. Source of truth
 
@@ -91,7 +91,7 @@ Every systemd instance uses its own configuration and default lock file, but the
 
     /var/lib/torr-arr-importer/state.db
 
-The database records a successfully imported hash after TorrServer has confirmed the expected hash in its response. The same record includes diagnostic fields such as source instance, Arr history/media IDs, title and available provider IDs.
+The database records a successfully imported hash only after the exact hash appears in a subsequent TorrServer `action=list` response. The same record includes diagnostic fields such as source instance, Arr history/media IDs, title and available provider IDs.
 
 The shared database is not an independent inventory of TorrServer. TorrServer membership is always checked separately. Its purpose is to remember intentional prior imports even after a user removes a torrent from TorrServer.
 
@@ -170,10 +170,10 @@ target_quality is descriptive configuration data. It represents which Arr lane c
 - HTTP 408, 429, 5xx and network failures can be retried according to retry_count and retry_delay.
 - API-like URL query credentials are redacted in logs/exceptions.
 - Each instance has its own process lock, so overlapping runs of that instance do not run concurrently.
-- Failed candidate additions are logged with the hash and a sanitized error; successful additions are recorded in SQLite only after TorrServer confirms the expected hash.
+- Failed candidate additions are logged with the hash and a sanitized error; successful additions are recorded in SQLite only after the exact hash is observed in a subsequent TorrServer `action=list` response.
 - --dry-run prints candidate decisions and media identifiers but does not add torrents or record successful imports.
 
-### Radarr blocklist behavior in v1.3.2
+### Radarr blocklist behavior in v1.3.3 (live terminal-path validation pending)
 
 - The opt-out setting radarr_blocklist_enabled defaults to true for Radarr and is ignored by Sonarr.
 - Only pending_adds rows with status = 'failed' and attempt_count >= max_add_attempts are eligible. A row marked failed by a permanent API rejection before reaching the configured count is saved as skipped_attempt_limit and is not blocklisted. Rows in retry_wait and permanent preparation failures before a TorrServer add are excluded.
@@ -185,7 +185,7 @@ target_quality is descriptive configuration data. It represents which Arr lane c
 
 ## 10. Notification state and failure summaries
 
-The planned terminal-only behavior sends no messages for pending or retry_wait attempts. Once a failure is terminal—or a permanent preparation error prevents the TorrServer add—the importer creates a grouped critical/failure message with media title, selected release title, a plain-language cause, attempts used or a permanent-error explanation, a recommendation to choose another release, and an optional Arr card link. If Seerr Watchlist is enabled, the same message includes the latest registration result. No separate warnings message or Seerr notification is emitted.
+The implemented terminal-only behavior sends no messages for pending or retry_wait attempts. Once a failure is terminal—or a permanent preparation error prevents the TorrServer add—the importer creates a grouped critical/failure message with media title, selected release title, a plain-language cause, attempts used or a permanent-error explanation, a recommendation to choose another release, and an optional Arr card link. If Seerr Watchlist is enabled, the same message includes the latest registration result. No separate warnings message or Seerr notification is emitted.
 
 Terminal notification state is extended in place in the existing SQLite DB:
 - notification_attempted_at is set only after a successful 2xx response from Apprise.

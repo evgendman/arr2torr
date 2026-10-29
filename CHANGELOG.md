@@ -1,11 +1,14 @@
 # Changelog
 
-## torr-arr-importer v1.3.3 (state-reconciliation candidate)
+## torr-arr-importer v1.3.3 (installed from PR #4 branch for controlled live validation; PR remains open)
 
 - Treat exact infohash membership in TorrServer's list as successful addition; remove the readiness-metadata requirement while retaining the requirement for a post-add list observation.
 - Remove stale pending_adds rows when the same hash is already in the successful imports history, without re-adding a hash that is absent from TorrServer after a deliberate removal.
 - Re-arm an exhausted failed row only when Radarr presents a strictly newer Grab history ID for the same hash; reset attempt, notification, Seerr and blocklist state for that new Grab.
 - Add regression tests for list-presence confirmation, stale pending cleanup, and re-grabbing a terminally failed hash.
+- Install the v1.3.3 code-only update on MINI-Ubuntu without changing TOML configuration, SQLite state or systemd units.
+- Live log review for the 10-hour window ending 2026-10-29 09:45 (+05:00): 115 completed Radarr runs, 79/79 add requests confirmed by subsequent list membership, and zero failed additions or importer ERROR/exception events.
+- The zero-seed Viking Quest 720p release appeared in TorrServer's list on the first attempt. This did not trigger retries or Radarr blocklisting; the live terminal-failure/blocklist path remains live-validation work.
 
 ## torr-arr-importer v1.3.2 (combined candidate)
 
@@ -26,7 +29,7 @@
 - Persist notification delivery attempts, last error and next retry time in SQLite. Mark terminal items notified only after an Apprise 2xx response; retry failed deliveries with a persisted backoff capped at one hour.
 - Keep delivery retries independent from TorrServer add attempts and import status. Network/notification failures do not change transfer success/failure semantics.
 - Keep distinct terminal-error rows separate when TMDb IDs are missing and test grouping, message aggregation, silent retry states and retry after Apprise failure.
-- SQLite changes are additive and migrate in place; the combined candidate has not yet been deployed or live-validated for Radarr blocklisting.
+- SQLite changes are additive and migrate in place. This combined behavior is installed in the v1.3.3 test candidate; the real terminal-failure-to-Radarr-blocklist path remains live-validation work.
 
 ## torr-arr-importer v1.3.1
 

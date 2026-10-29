@@ -72,7 +72,7 @@ With the usual five-minute timer, a successfully grabbed release is normally tra
 
 TorrServer may acknowledge an add request before its background metadata acquisition completes. An expected hash in the initial response is therefore not treated as final success.
 
-The importer persists a pending attempt before the add request, submits eligible releases first, then polls the TorrServer list at a configurable interval. Every pending hash has its own deadline. Usable FileStats, a working status, or TorrServer's explicit database-presence status is used as observable verification evidence. The successful-import table is updated only after this evidence is observed.
+The importer persists a pending attempt before the add request, submits eligible releases first, then polls the TorrServer list at a configurable interval. Every pending hash has its own deadline. In v1.3.3, success is recorded only after the exact infohash appears in a subsequent TorrServer `action=list` response. This confirms list membership only; it does not require FileStats/readiness and does not prove that playback will work or that data is durably committed.
 
 Pending attempts live in the shared SQLite table pending_adds and do not contain the credential-bearing download URL. After a process restart, they are reconciled against TorrServer before retrying. Failures use bounded exponential backoff and stop automatically after the configured attempt limit; --retry-failed explicitly re-queues exhausted, never-confirmed attempts for the selected Arr instance.
 
@@ -80,7 +80,7 @@ Verification means the exact infohash appears in TorrServer's action=list respon
 
 Default verification settings are verification_timeout_sec = 120, verification_poll_interval_sec = 3.0, retry_backoff_sec = 60 (doubling per failed attempt, capped at one hour), and max_add_attempts = 3. Compare the timeout with the TorrentDisconnectTimeout setting of the installed TorrServer build.
 
-## Final-failure Apprise notifications (next revision)
+## Final-failure Apprise notifications (v1.3.2; retained in v1.3.3)
 
 Notifications are opt-in and use the shared Apprise API; arr2torr never stores Telegram tokens, chat IDs or topic IDs. **There are no Telegram messages while an item is still waiting for an automatic add/verification retry.** The importer waits until the failure is terminal (all configured add attempts are exhausted, or a permanent error makes retry impossible).
 
@@ -88,7 +88,7 @@ The final message goes to the critical tag and brings the entire action-oriented
 
 Terminal notification state is stored in the existing SQLite database and is migrated in place. An unsuccessful Apprise request leaves the message pending and schedules another attempt with increasing delays (1, 5, 15, 30 and then 60 minutes, capped at one hour). A successful 2xx response marks the notification delivered. This is at-least-once delivery: if Apprise accepts a request but its response is lost, a retry can result in a duplicate. Delivery failures never change the TorrServer import result. Notifications remain disabled in example configs by default. See [Installation and configuration](docs/INSTALLATION.md) and [Operations](docs/OPERATIONS.md).
 
-## Automatic Radarr blocklist after terminal transfer failure (v1.3.2)
+## Automatic Radarr blocklist after terminal transfer failure (introduced in v1.3.2; reconciled in v1.3.3)
 
 The Radarr-only setting radarr_blocklist_enabled defaults to true, including when it is omitted from an existing TOML file. Once a release reaches terminal TorrServer add/verification failure after all configured attempts, arr2torr calls Radarr's native POST /api/v3/history/failed/{historyId} endpoint for that Grab history record. Radarr then handles the failure and blocklist through its own supported pipeline; this can allow replacement searching according to Radarr's own settings.
 
@@ -207,8 +207,8 @@ The current code package is **torr-arr-importer v1.3.3**. It uses Python 3.11+ a
 
 ## Current status
 
-MINI-Ubuntu currently has the combined v1.3.2 candidate installed, including Radarr blocklisting and terminal-only notification retries. The v1.3.3 candidate adds list-membership success semantics, stale-pending cleanup, and re-arming after a newer Radarr Grab; it still requires regression tests and controlled live validation.
+MINI-Ubuntu is running `torr-arr-importer 1.3.3` from PR #4 branch `feature/radarr-blocklist-v1.3.2`, commit `7e8feb7`. The code-only deployment preserves the existing TOML configuration, SQLite state and systemd units. PR #4 remains open and unmerged; no tagged release is claimed.
 
-PR #4 adds default-enabled Radarr blocklisting only after the configured TorrServer add/verification attempt limit is exhausted. A source comparison found that the original PR branch did not include the notification changes present in the installed file. The combined candidate is being reconciled and must pass a fresh full test run and CI before installation.
+During the 10-hour journal window ending 2026-10-29 09:45 (+05:00), the Radarr service completed 115 runs. It submitted 79 add requests, and all 79 were confirmed by exact hash membership in a subsequent TorrServer list response. There were zero failed additions and no importer `ERROR`/exception events. The six newer-Grab re-arm warnings and five stale-pending cleanup events were expected reconciliation actions.
 
-The blocklisting behavior is not yet live-validated against Radarr. Before re-enabling production timers, a deliberately selected test Grab should confirm the native failed-history endpoint behavior. Existing live configuration, SQLite state and systemd units must be preserved.
+The zero-seed `Viking Quest (2014) BDRip 720p | P2` release was accepted and appeared in TorrServer's list on the first attempt. That validates the list-membership success rule but **does not validate terminal-failure blocklisting**. The remaining live test is a release that never appears in the list after all three configured attempts, followed by confirmation of Radarr's native blocklist entry and the grouped critical Apprise notification. Since no terminal failure occurred in the reviewed window, Apprise delivery was not exercised during that window. See [Roadmap and validation status](ROADMAP.md).

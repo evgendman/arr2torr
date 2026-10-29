@@ -64,7 +64,7 @@ Arr often focuses on the final chosen download in a conventional workflow. Howev
 
 That means different versions of one movie or series can coexist in TorrServer. The downstream library can expose each one as a distinct root with its own source identity and allow the viewer to choose.
 
-## Radarr blocklisting after terminal TorrServer failure (v1.3.2)
+## Radarr blocklisting after terminal TorrServer failure (implemented; live terminal-path validation pending)
 
 radarr_blocklist_enabled defaults to true for Radarr. It can be disabled per Radarr config with radarr_blocklist_enabled = false; Sonarr profiles never execute this path.
 
@@ -81,6 +81,8 @@ Look for these log events:
 Radarr's public BlocklistResource currently does not expose the torrent infohash. Therefore, recovery after an ambiguous response can match sourceTitle for that movie, but cannot independently prove that the matched entry has the same hash. The normal path does not use a fake POST /blocklist endpoint; it relies on Radarr's own history/failed API.
 
 The blocklist outcome is appended to the existing grouped terminal Apprise failure notification, not sent as a separate message. If Apprise is disabled, the result remains in the logs. The new state fields are migrated in-place in the shared SQLite database. Existing terminal failures found during the first migration are marked legacy_skipped to prevent retroactive mass blocklisting; new terminal failures are processed automatically. Deliberately re-arming an exhausted attempt with --retry-failed resets its blocklist state.
+
+**Live-validation caveat:** success is defined by exact hash membership in a subsequent TorrServer `action=list` response. A release with zero seeds can still be accepted and listed, so it will correctly be treated as an importer success and will not reach blocklisting. The required live test must use a release whose hash remains absent through all three add/verification attempts. Then confirm the terminal row, `RADARR_BLOCKLIST_BLOCKED` (or a verified `RADARR_BLOCKLIST_ALREADY_PRESENT` result after an ambiguous response), the actual Radarr blocklist entry and the final grouped Apprise delivery. This end-to-end terminal path has not yet been observed on MINI-Ubuntu.
 
 ## Seerr Watchlist tracking (v1.3.0)
 

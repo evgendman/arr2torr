@@ -2,6 +2,8 @@
 
 The instructions below describe the v1.3.3 in-place update, including Radarr terminal-failure blocklisting, list-membership confirmation and stale-state reconciliation, plus optional Seerr Watchlist integration. The four-instance examples are intended to be adapted to the actual addresses, ports and API keys in your installation.
 
+> **Known deployment status (2026-10-29):** v1.3.3 is already installed on MINI-Ubuntu from PR #4 branch `feature/radarr-blocklist-v1.3.2` for controlled live validation. The code-only install replaced `importer.py` and preserved configuration, SQLite state and systemd units. The ordinary Radarr timer path passed a 10-hour log review (115 completed runs, 79 list-confirmed adds, zero failed additions). The terminal-failure-to-Radarr-blocklist path remains unverified; do not read this historical upgrade procedure as an instruction to reinstall the already-installed code.
+
 ## Requirements
 
 - Linux with systemd;
@@ -55,7 +57,7 @@ The v1.3.2 schema migration remains in place; v1.3.3 does not reset the database
 3. Back up the currently installed program, local configs, systemd units and the SQLite state before running the installer. Keep the backup under `/tmp` and retain its path:
 
        set -euo pipefail
-       BACKUP="$(mktemp -d /tmp/arr2torr-v1.3.1-backup.XXXXXX)"
+       BACKUP="$(mktemp -d /tmp/arr2torr-v1.3.2-backup.XXXXXX)"
        sudo install -d -m 0700 "$BACKUP"
        sudo cp -a /opt/torr-arr-importer/importer.py "$BACKUP/importer.py"
        sudo cp -a /etc/torr-arr-importer "$BACKUP/config"
@@ -77,7 +79,7 @@ The v1.3.2 schema migration remains in place; v1.3.3 does not reset the database
 
 4. Install the staged source. The installer preserves existing API keys/configuration values and does not clear the state database:
 
-       SRC="$(cat /tmp/arr2torr-v1.3.2-source-path)"
+       SRC="$(cat /tmp/arr2torr-v1.3.3-source-path)"
        sudo bash "$SRC/install.sh"
        /opt/torr-arr-importer/importer.py --version
        sudo cmp "$SRC/src/importer.py" /opt/torr-arr-importer/importer.py
