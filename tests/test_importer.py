@@ -358,7 +358,7 @@ class BatchVerificationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = make_config(Path(tmp))
             cfg = importer.replace(
-                cfg, verification_timeout_sec=10, verification_poll_interval_sec=0.1,
+                cfg, verification_timeout_sec=10, verification_poll_interval_sec=0.2,
             )
             grab = make_grab()
             live_incomplete = {
