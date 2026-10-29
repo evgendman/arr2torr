@@ -9,8 +9,8 @@ A normal cycle logs a concise summary of each stage:
 3. A TorrServer list snapshot is read.
 4. SNAPSHOT — number of distinct Arr grabs, hashes currently on TorrServer, hashes already known to the shared import history and new candidates.
 5. For each candidate, Arr media/series details are fetched as needed, then an add is sent to TorrServer.
-6. ADD_ACCEPTED logs TorrServer's initial acknowledgement; ADDED is logged only after the exact hash appears in TorrServer's action=list response.
-7. DONE records candidates, added/failed counts, hashes skipped as already present, hashes skipped as previously imported, elapsed time and dry-run mode where applicable.
+6. ADD_ACCEPTED logs TorrServer's initial acknowledgement; ADDED is logged only after the exact hash exposes usable FileStats. A listed-but-incomplete hash is inspected with action=get, not blindly re-added.
+7. DONE records candidates, added/failed counts, ready hashes skipped as present, incomplete hashes, previously imported hashes, elapsed time and dry-run mode where applicable.
 
 Example commands:
 
@@ -82,7 +82,7 @@ Radarr's public BlocklistResource currently does not expose the torrent infohash
 
 The blocklist outcome is appended to the existing grouped terminal Apprise failure notification, not sent as a separate message. If Apprise is disabled, the result remains in the logs. The new state fields are migrated in-place in the shared SQLite database. Existing terminal failures found during the first migration are marked legacy_skipped to prevent retroactive mass blocklisting; new terminal failures are processed automatically. Deliberately re-arming an exhausted attempt with --retry-failed resets its blocklist state.
 
-**Live-validation caveat:** success is defined by exact hash membership in a subsequent TorrServer `action=list` response. A release with zero seeds can still be accepted and listed, so it will correctly be treated as an importer success and will not reach blocklisting. The required live test must use a release whose hash remains absent through all three add/verification attempts. Then confirm the terminal row, `RADARR_BLOCKLIST_BLOCKED` (or a verified `RADARR_BLOCKLIST_ALREADY_PRESENT` result after an ambiguous response), the actual Radarr blocklist entry and the final grouped Apprise delivery. This end-to-end terminal path has not yet been observed on MINI-Ubuntu.
+**Live-validation caveat:** under the v1.3.4 candidate, success requires usable `FileStats`, not mere hash membership. A zero-seed release may still yield valid metadata and therefore correctly not reach blocklisting. The failure fixture must remain without usable `FileStats` (whether its hash remains listed or disappears) through all three verification attempts. Then confirm the terminal row, `RADARR_BLOCKLIST_BLOCKED` (or a verified `RADARR_BLOCKLIST_ALREADY_PRESENT` result after an ambiguous response), the actual Radarr blocklist entry and the final grouped Apprise delivery. This end-to-end terminal path has not yet been observed on MINI-Ubuntu.
 
 ## Seerr Watchlist tracking (v1.3.0)
 
@@ -107,22 +107,25 @@ Use the HISTORY and SNAPSHOT log lines first.
 | skipped_no_data | The history record did not contain a usable data object. |
 | skipped_no_hash | No data.torrentInfoHash; the importer cannot deduplicate it reliably. |
 | skipped_no_url | No data.downloadUrl; the importer cannot pass the selected release to TorrServer. |
-| skipped_present | The hash already exists in TorrServer. This is expected and safe. |
-| skipped_known | The hash was previously imported, is now absent from TorrServer, and normal mode refuses to resurrect it. Use --rebuild only if restoration is intended. |
+| skipped_present | The hash has usable `FileStats` in TorrServer. This is expected and safe. |
+| present_incomplete | The hash appears in `action=list` but does not have usable `FileStats`; inspect metadata-recovery logs and the last observed status. |
+| skipped_known | The hash was previously imported, is now absent from TorrServer, and normal mode refuses to resurrect it. Use `--rebuild` only if restoration is intended. |
 | FAILED | The candidate reached the add attempt but failed. Read the sanitized error and check API reachability, authorization and the TorrServer response. |
 | candidates=0 | No eligible new hashes were found under the current filtering rule. It is not in itself an error. |
 
-## Asynchronous add verification (v1.1.0)
+## Asynchronous add verification (strict FileStats criterion; candidate v1.3.4)
 
-An ADD_ACCEPTED log entry means TorrServer acknowledged the add request; it is not a completed import. ADDED is logged after a later TorrServer action=list response contains the exact hash. List membership confirms presence only; it does not guarantee streamability.
+An `ADD_ACCEPTED` log entry means TorrServer acknowledged the request; it is not a completed import. `ADDED` is logged only when the exact hash exposes a non-empty usable `FileStats` list. Each item must have a positive unique file ID and a unique safe relative path. The status string (`Torrent added`, `Torrent getting info`, `Torrent working` or `Torrent in db`) and `action=list` membership alone are not sufficient.
 
-The importer submits eligible candidates first, then polls one shared TorrServer action=list snapshot at a configurable interval. Each attempt has its own deadline measured from the add request. Defaults are a 120-second verification deadline and a 3-second polling interval. Compare the deadline with TorrentDisconnectTimeout in the installed TorrServer build.
+The importer submits eligible candidates first, then polls a shared TorrServer `action=list` snapshot at a configurable interval. Each attempt has its own deadline measured from the initial add. Defaults are a 120-second verification deadline, a 3-second polling interval and three add/verification attempts. Compare the deadline with `TorrentDisconnectTimeout` in the installed TorrServer build.
+
+If the hash is present but has no usable `FileStats`, the importer checks the live object using `action=get`; it does not blindly send another add request. A DB-only `Torrent in db` record may receive one metadata-activation request per attempt, but not after the attempt deadline. If the hash disappears and the deadline expires, the existing bounded retry/backoff policy applies. A retry distinguishes an absent hash (another add can be submitted) from a still-present incomplete hash (re-observe/recover metadata first).
 
 The shared state database contains:
-- imports: confirmed import history and the existing intentional-removal safeguard;
-- pending_adds: in-flight, retry-waiting, or exhausted attempts. This table stores safe descriptive fields but not the original download URL or any API key.
+- `imports`: successful-import history and the intentional-removal safeguard. Entries written by v1.3.3 used the weaker list-only criterion and are not automatically reclassified; absent hashes remain protected from resurrection.
+- `pending_adds`: in-flight, retry-waiting or exhausted attempts. It now includes `metadata_activation_attempt`, added through an in-place migration. The table still excludes the original download URL and API keys.
 
-After restart, pending attempts are checked against TorrServer before another request is sent. A present but not-yet-ready hash stays pending until the verification deadline. Confirmed attempts are atomically promoted into imports. Expired attempts use exponential backoff, capped at one hour; the default maximum is three add attempts. After that limit the attempt is left in failed state and normal polling does not automatically resend it.
+After restart, pending attempts are reconciled against TorrServer and verified before promotion. Expired attempts use exponential backoff, capped at one hour; after the configured attempt limit the item remains failed and normal polling does not automatically resend it.
 
 To explicitly re-queue exhausted unverified attempts for one source instance, run:
 
@@ -130,7 +133,7 @@ To explicitly re-queue exhausted unverified attempts for one source instance, ru
 
 Do not combine --retry-failed with --dry-run. This option re-queues only failed unverified attempts for the selected instance; it does not clear successful import history or automatically restore confirmed user-removed torrents. Use --rebuild only for intentional historical repopulation.
 
-Verification means the exact hash appears in TorrServer's action=list response. It does not guarantee that media metadata is ready, that playback will work, or that TorrServer has acknowledged a durable disk commit.
+In the v1.3.4 candidate, verification means usable `FileStats` are available for the exact hash. This establishes that the downstream importer can inspect a file structure; it does not itself guarantee successful playback, seeding or durable disk commit.
 
 ## API and authentication errors
 
