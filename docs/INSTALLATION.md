@@ -2,7 +2,7 @@
 
 This guide includes initial setup and a controlled in-place update path for the v1.3.4 FileStats-verification candidate. MINI-Ubuntu remains on v1.3.3 until the candidate is separately approved and live-validated. The four-instance examples must be adapted to the actual addresses, ports and API keys in your installation.
 
-> **Known deployment status (2026-10-29):** v1.3.3 is already installed on MINI-Ubuntu from PR #4 branch `feature/radarr-blocklist-v1.3.2` for controlled live validation. The code-only install replaced `importer.py` and preserved configuration, SQLite state and systemd units. The ordinary Radarr timer path passed a 10-hour log review (115 completed runs, 79 list-confirmed adds, zero failed additions). The terminal-failure-to-Radarr-blocklist path remains unverified; do not read this historical upgrade procedure as an instruction to reinstall the already-installed code.
+> **Known deployment status (2026-10-29):** v1.3.3 is installed on MINI-Ubuntu from PR #4 branch `feature/radarr-blocklist-v1.3.2`. The code-only deployment replaced `importer.py` and preserved configuration, SQLite state and systemd units. The ordinary Radarr timer path passed a 10-hour log review (115 runs, 79 adds confirmed by list membership under the old criterion, zero failed additions). The terminal-failure-to-Radarr-blocklist path remains unverified. The v1.3.4 steps below describe a candidate only; they do not authorize or claim a deployment.
 
 ## Requirements
 
