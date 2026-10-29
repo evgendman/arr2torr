@@ -201,7 +201,7 @@ The current stored data subset includes source instance name, media type, target
 - [Roadmap and validation status](ROADMAP.md)
 - [Version history](CHANGELOG.md)
 
-The current code candidate is **torr-arr-importer v1.3.4**. It uses Python 3.11+ and the standard library; it does not require external Python packages.
+The installed and verified runtime is **torr-arr-importer v1.3.4**. It uses Python 3.11+ and the standard library; it does not require external Python packages. GitHub PR #4 remains open, so the installed version is not yet an official tagged release.
 
 ## Related project: STRM/NFO library generation
 
