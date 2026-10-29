@@ -279,6 +279,39 @@ class BatchVerificationTests(unittest.TestCase):
             self.assertEqual(db.pending_rows(), [])
             db.close()
 
+    def test_expired_pending_db_only_does_not_send_metadata_activation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab()
+            db = importer.StateDB(cfg.state_db)
+            db.begin_pending(grab, cfg.name, {"imdbId": "tt123"}, cfg.verification_timeout_sec)
+            db.conn.execute(
+                "UPDATE pending_adds SET deadline_at=? WHERE hash=?",
+                (
+                    (importer.datetime.now(importer.timezone.utc) - importer.timedelta(seconds=1)).isoformat(),
+                    HASH1,
+                ),
+            )
+            db.conn.commit()
+            db.close()
+
+            db_only = {"hash": HASH1, "stat": 5, "stat_string": "Torrent in db"}
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(importer, "fetch_torrserver", return_value=[db_only]),
+                mock.patch.object(importer, "fetch_media", return_value={"imdbId": "tt123"}),
+                mock.patch.object(importer, "add_to_torrserver") as add_mock,
+                mock.patch.object(importer, "pending_deadline", wraps=importer.pending_deadline),
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 1)
+            add_mock.assert_not_called()
+            db = importer.StateDB(cfg.state_db)
+            self.assertEqual(db.pending_rows()[0]["status"], "retry_wait")
+            self.assertNotIn(HASH1, db.all_hashes())
+            db.close()
+
     def test_due_retry_with_present_live_hash_does_not_send_duplicate_add(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = make_config(Path(tmp))
