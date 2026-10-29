@@ -2,16 +2,16 @@
 
 This document separates the installed torr-arr-importer revision, observed live behavior, historical results and remaining validation gates.
 
-## Current installed revision and live validation (2026-10-29)
+## Confirmed installed revision and live validation (2026-10-29)
 
-- **Installed code:** `torr-arr-importer 1.3.3` remains on MINI-Ubuntu, deployed from PR #4 branch `feature/radarr-blocklist-v1.3.2` at commit `7e8feb7`. This preparation did not modify the host, its configuration, SQLite state or systemd units.
-- **Installed v1.3.3 validation (historical):** GitHub Actions run [#89](https://github.com/evgendman/arr2torr/actions/runs/40748346991) passed on Python 3.11 and 3.12.
-- **Prepared v1.3.4 candidate:** source and regression tests are updated on PR #4. GitHub Actions [run #114](https://github.com/evgendman/arr2torr/actions/runs/40833317871) passed on Python 3.11 and 3.12, including compilation, **49 unit tests** and the version check (`1.3.4`). The candidate is not installed or live-validated; PR #4 remains open and unmerged.
-- **Live timer run review (historical criterion):** for the 10-hour journal window ending 2026-10-29 09:45 (+05:00), the Radarr importer completed **115 runs**. It submitted **79** add requests; all 79 were confirmed by exact infohash membership in a later TorrServer `action=list` response. There were **0 failed additions**, no `ERROR`/exception entries and no `RADARR_BLOCKLIST_*` or `APPRISE_*` events. This establishes list membership under the then-current criterion, but not that all those imports had usable file metadata.
-- **Zero-seed test outcome:** `Viking Quest (2014) BDRip 720p | P2` was accepted and appeared in TorrServer's list on the first attempt. This confirmed list membership only; it did not prove that `FileStats` was available or exercise terminal failure/blocklisting.
-- **Corrective finding after manual retry (2026-10-29, 10:41 +05):** `--retry-failed` re-queued **32** terminal rows. v1.3.3 logged `added=32 failed=0` because each exact hash appeared in `action=list`. Subsequent `torr2strm` warnings reported missing file metadata or HTTP 404 for several titles in that batch, including *Inside Out (2015)*, *Sabrina The Teenage Witch*, *The Adam Project* and *Turbo*. The v1.3.4 candidate now requires usable `FileStats` and includes unit tests; the installed v1.3.3 still has the weak list-membership criterion. The 32 historical success rows need a separate, cautious live re-assessment; this code preparation does not alter the host's SQLite history.
-- **Still open:** select a release for which usable `FileStats` remain unavailable through all three configured attempts, whether the hash is absent or visible without metadata. Verify that the importer reaches terminal failure, Radarr's native failed-history pipeline actually records the release in its blocklist, and the single grouped critical Apprise message reports the outcome and delivery state. Until that controlled case passes, live blocklist behavior is **not validated**.
-
+- **Installed runtime:** `/opt/torr-arr-importer/importer.py --version` returned `1.3.4` on MINI-Ubuntu. Its SHA-256 is `cb10e78ab5f9e94d36af5cb77622ad86601a505bb1410f85bbe458d3dd82c3f4`, identical to the prepared source file from commit `78ba4801e5e1fc3cfdc4cb620e2e55853e61573c`. The in-place deployment replaced only `importer.py`; config files, the shared SQLite database and systemd unit files were preserved. A backup is retained under `/tmp/arr2torr-v1.3.3-backup.l78Rxu`.
+- **GitHub publication state:** PR [#4](https://github.com/evgendman/arr2torr/pull/4) remains open and unmerged. No Git tag or published GitHub release is present. Therefore, v1.3.4 is the **confirmed installed source/runtime version**, but it is not yet an official tagged release. The current PR branch adds documentation on top of the tested source; code and tests match the deployed source pin.
+- **Automated tests:** GitHub Actions [run #117](https://github.com/evgendman/arr2torr/actions/runs/40833440612) passed on Python 3.11 and 3.12 with 49 unit tests, compilation and version check (`1.3.4`). The same Python source and tests are installed on the host.
+- **Strict success verification live-tested (2026-10-29):** after new Radarr media appeared, the 12:35:53 run found 21 candidates. Fourteen initially reached `ADDED verification=usable-file-stats`; `Everyone Says I Love You (1996)` subsequently succeeded on attempt 3. Five further alternative releases discovered after blocklisting also reached `ADDED verification=usable-file-stats`. In total, 20 observed successful additions were confirmed by usable `FileStats`, not just by a TorrServer acknowledgement or hash membership.
+- **Terminal blocklist path live-confirmed:** six failed release choices reached the configured three-attempt limit and emitted `RADARR_BLOCKLIST_BLOCKED` after Radarr's native failed-history action. The two grouped critical notifications were also acknowledged by Apprise (`APPRISE_SENT`, HTTP 200; groups of two and four items, respectively). The six releases were *Leaves of Grass* (2009), *Keeping the Faith* (2000), *The French Dispatch* (2021), *Motherless Brooklyn* (2019), *Isle of Dogs* (2018) and *Sausage Party* (2016). This confirms the previously untested live blocklist path for this observed batch.
+- **Replacement search outcome:** five replacement releases for the first five titles above were subsequently confirmed with usable `FileStats`. The alternative *Sausage Party* HDRip 480p release had not reached usable `FileStats` by the 12:57:56 log entry (attempt 2); its 13:00:54 timer cycle was still running at the 13:02:43 status check. Re-check its eventual outcome separately.
+- **Systemd status caveat:** cycles that contain failed verification items log their `DONE` summary and exit code 1, leaving the oneshot service marked `failed` even though the timer remains active and schedules later cycles. This matches the current `return 0 if failed == 0 else 1` code path; consider a separate operations/exit-status improvement. Do not interpret the unit's failed state as proof that blocklist requests or the timer itself failed.
+- **Still open:** reassess the 32 historical success rows created under v1.3.3's weaker list-membership criterion without resetting SQLite or resurrecting intentionally removed hashes; confirm downstream processing of a newly `FileStats`-verified release by torr2strm; and re-check the pending *Sausage Party* alternative. The new importer has not been shown to prove successful playback or end-to-end library ingestion from `FileStats` alone.
 ## Implemented
 
 - One standard-library Python implementation for both Radarr and Sonarr.
@@ -27,7 +27,7 @@ This document separates the installed torr-arr-importer revision, observed live 
 - --dry-run and --rebuild.
 - Protection against automatic re-adding after a user removes a known imported torrent from TorrServer.
 - Useful summary logs (HISTORY, SNAPSHOT, ADD, ADD_ACCEPTED, ADDED, VERIFY_FAILED, FAILED, DONE).
-- Batch verification with per-hash deadlines and shared polling. The installed v1.3.3 confirms list membership only; the v1.3.4 candidate requires usable `FileStats`, validates IDs/paths, inspects live incomplete objects without duplicate adds, and supports bounded metadata activation for DB-only records. Candidate CI passed; live validation and review of historical v1.3.3 success rows remain open in item 7 below.
+- Batch verification with per-hash deadlines and shared polling. Installed v1.3.4 requires usable `FileStats`, validates IDs/paths, inspects live incomplete objects without duplicate adds, and supports bounded metadata activation for DB-only records. GitHub Actions passed; live readiness and terminal blocklist paths were confirmed on MINI-Ubuntu on 2026-10-29. Historical v1.3.3 success rows and downstream torr2strm confirmation remain open in item 7 below.
 - Atomic pending claims across Arr instances, persistent retry state, bounded exponential backoff and explicit --retry-failed recovery.
 - Terminal-only grouped critical Apprise messages with persistent delivery retry state, independent of TorrServer retry state.
 - Optional Seerr Watchlist tracking for terminal transfer failures.
@@ -205,7 +205,7 @@ Add tests for:
 
 ### 7. Confirm successful additions only after usable TorrServer FileStats are available
 
-**Status: code candidate prepared; live validation required.** Installed v1.3.3 still uses exact-hash membership in `action=list` as success. Candidate v1.3.4 implements and tests the stricter `FileStats` contract (GitHub Actions [run #114](https://github.com/evgendman/arr2torr/actions/runs/40833317871) passed on Python 3.11/3.12 with 49 tests), but it has not been deployed to MINI-Ubuntu. The 2026-10-29 manual retry showed why the new criterion is needed: later `torr2strm` could not obtain file structure or even find some hashes by `action=get`.
+**Status: deployed and live-validated on MINI-Ubuntu (2026-10-29); PR #4 is still open and no official tag exists.** Installed v1.3.4 requires usable `FileStats` rather than exact-hash membership alone. Its file SHA-256 is `cb10e78ab5f9e94d36af5cb77622ad86601a505bb1410f85bbe458d3dd82c3f4`; 49 tests pass in GitHub Actions [run #117](https://github.com/evgendman/arr2torr/actions/runs/40833440612). Live runs confirmed 20 additions with usable `FileStats`, six terminal failures reaching Radarr's native blocklist, and grouped critical Apprise delivery (HTTP 200). The 32-row v1.3.3 historical re-assessment and downstream torr2strm confirmation remain open.
 
 **Required success contract**
 
@@ -220,9 +220,10 @@ When a hash is listed without usable `FileStats`, keep checking its details with
 - [x] Implement and test the metadata-recovery path for DB-only/present-but-incomplete hashes without blindly resending adds to live objects.
 - [x] Preserve bounded retries and terminal-failure handling when `FileStats` never arrives; an unverified pending item is not promoted to successful-import history.
 - [x] Add regression tests for hash-visible-without-FileStats, delayed readiness, malformed metadata, metadata-recovery `action=get` HTTP 404, DB-only activation and absent-versus-present retry handling.
-- [ ] Live-validate that a newly added release enters successful-import history only after usable `FileStats` is exposed and is then processed by `torr2strm`.
-- [ ] Reassess the 2026-10-29 batch of 32 re-queued items against usable `FileStats`; the earlier 32/32 list-presence result is not sufficient evidence of successful downstream readiness.
-- [ ] Separately live-validate a release that remains without usable `FileStats` through all three configured attempts and confirm terminal failure triggers the Radarr blocklist and grouped critical Apprise outcome.
+- [x] Live-validate on MINI-Ubuntu that newly added releases are recorded as successful only after usable `FileStats`; 20 successful additions were observed in the 2026-10-29 logs.
+- [ ] Confirm at least one of those verified releases completed downstream processing by `torr2strm`; `FileStats` alone does not prove end-to-end library ingestion.
+- [ ] Reassess the 2026-10-29 batch of 32 v1.3.3 historical rows against usable `FileStats`; the earlier 32/32 list-presence result is not sufficient evidence of downstream readiness.
+- [x] Live-validate terminal failure after three attempts, Radarr's native blocklist action, and the grouped critical Apprise outcome. Six release choices were blocklisted and the grouped critical deliveries received HTTP 200.
 
 ### 8. Coordinate with the downstream STRM/NFO project
 
@@ -279,7 +280,7 @@ The importer already preserves provider IDs and selected Arr fields in TorrServe
 
 ### 10. Automatically blocklist terminally failed Radarr releases
 
-**Status: implemented in the installed v1.3.3 candidate; regression tests and CI pass. Ordinary live imports pass, but the real terminal-failure-to-Radarr-blocklist path remains unverified.**
+**Status: implemented and live-validated in installed v1.3.4 on MINI-Ubuntu (2026-10-29). Six terminally failed release choices were processed by Radarr's native failed-history path; two grouped critical Apprise notifications were acknowledged with HTTP 200. PR #4 remains open and v1.3.4 is not yet a tagged GitHub release.**
 
 **Goal**
 
@@ -319,7 +320,7 @@ Reduce manual intervention by automatically excluding a release from future Rada
 - [x] v1.3.3 local regression suite: 42 tests passed.
 - [x] GitHub Actions run [#89](https://github.com/evgendman/arr2torr/actions/runs/40748346991): Python 3.11 and 3.12 both passed.
 - [x] Install the code-only v1.3.3 update on MINI-Ubuntu and validate the normal timer path: 115 completed runs in the reviewed 10-hour window; 79/79 add requests confirmed by list membership; no failed additions.
-- [ ] Use a release for which usable `FileStats` remain unavailable through all three attempts (including the case where the hash remains visible without metadata); verify terminal state, Radarr's native blocklist entry, and the grouped critical Apprise message with a confirmed delivery result. The zero-seed Viking Quest 720p test did not reach this path because TorrServer accepted and listed it.
+- [x] Live-confirm the terminal failure/blocklist/critical-notification path on 2026-10-29: six releases exhausted three attempts, produced `RADARR_BLOCKLIST_BLOCKED`, and were grouped into two critical Apprise deliveries acknowledged with HTTP 200. The zero-seed Viking Quest 720p test was not sufficient on its own; the later batch exercised the required path.
 
 ## Explicitly not planned
 
