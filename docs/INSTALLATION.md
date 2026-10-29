@@ -1,6 +1,6 @@
 # Installation and configuration
 
-This guide includes initial setup, the historical v1.3.3 deployment procedure and a controlled in-place update path for the v1.3.4 FileStats-verification candidate. MINI-Ubuntu remains on v1.3.3 until the candidate is separately approved and live-validated. The four-instance examples must be adapted to the actual addresses, ports and API keys in your installation.
+This guide includes initial setup and a controlled in-place update path for the v1.3.4 FileStats-verification candidate. MINI-Ubuntu remains on v1.3.3 until the candidate is separately approved and live-validated. The four-instance examples must be adapted to the actual addresses, ports and API keys in your installation.
 
 > **Known deployment status (2026-10-29):** v1.3.3 is already installed on MINI-Ubuntu from PR #4 branch `feature/radarr-blocklist-v1.3.2` for controlled live validation. The code-only install replaced `importer.py` and preserved configuration, SQLite state and systemd units. The ordinary Radarr timer path passed a 10-hour log review (115 completed runs, 79 list-confirmed adds, zero failed additions). The terminal-failure-to-Radarr-blocklist path remains unverified; do not read this historical upgrade procedure as an instruction to reinstall the already-installed code.
 
@@ -54,7 +54,7 @@ The v1.3.4 candidate adds `metadata_activation_attempt` to `pending_adds` throug
 
    If the target host's current timer state differs, adjust the commands to that observed state. Do not stop/start unrelated instances or enable 4K profiles as part of this update.
 
-3. Back up the currently installed program, local configs, systemd units and the SQLite state before running the installer. Keep the backup under `/tmp` and retain its path:
+3. Back up the currently installed program, local configs, systemd units and the SQLite state before replacing the importer. Keep the backup under `/tmp` and retain its path:
 
        set -euo pipefail
        BACKUP="$(mktemp -d /tmp/arr2torr-v1.3.3-backup.XXXXXX)"
@@ -77,7 +77,7 @@ The v1.3.4 candidate adds `metadata_activation_attempt` to `pending_adds` throug
        printf '%s\n' "$BACKUP" > /tmp/arr2torr-v1.3.3-backup-path
        echo "Backup saved under: $BACKUP"
 
-4. Install the staged source. The installer preserves existing API keys/configuration values and does not clear the state database:
+4. Replace only the importer program after the target timer is stopped. Do not run `install.sh` for this code-only update: the existing systemd units and TOML files should remain untouched:
 
        SRC="$(cat /tmp/arr2torr-v1.3.4-source-path)"
        sudo install -o root -g root -m 0755 "$SRC/src/importer.py" /opt/torr-arr-importer/importer.py
