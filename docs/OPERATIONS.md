@@ -64,7 +64,7 @@ Arr often focuses on the final chosen download in a conventional workflow. Howev
 
 That means different versions of one movie or series can coexist in TorrServer. The downstream library can expose each one as a distinct root with its own source identity and allow the viewer to choose.
 
-## Radarr blocklisting after terminal TorrServer failure (implemented; live terminal-path validation pending)
+## Radarr blocklisting after terminal TorrServer failure (implemented and live-validated on MINI-Ubuntu, 2026-10-29)
 
 radarr_blocklist_enabled defaults to true for Radarr. It can be disabled per Radarr config with radarr_blocklist_enabled = false; Sonarr profiles never execute this path.
 
@@ -82,7 +82,9 @@ Radarr's public BlocklistResource currently does not expose the torrent infohash
 
 The blocklist outcome is appended to the existing grouped terminal Apprise failure notification, not sent as a separate message. If Apprise is disabled, the result remains in the logs. The new state fields are migrated in-place in the shared SQLite database. Existing terminal failures found during the first migration are marked legacy_skipped to prevent retroactive mass blocklisting; new terminal failures are processed automatically. Deliberately re-arming an exhausted attempt with --retry-failed resets its blocklist state.
 
-**Live-validation caveat:** under the v1.3.4 candidate, success requires usable `FileStats`, not mere hash membership. A zero-seed release may still yield valid metadata and therefore correctly not reach blocklisting. The failure fixture must remain without usable `FileStats` (whether its hash remains listed or disappears) through all three verification attempts. Then confirm the terminal row, `RADARR_BLOCKLIST_BLOCKED` (or a verified `RADARR_BLOCKLIST_ALREADY_PRESENT` result after an ambiguous response), the actual Radarr blocklist entry and the final grouped Apprise delivery. This end-to-end terminal path has not yet been observed on MINI-Ubuntu.
+**Live result (2026-10-29):** six release choices remained unverified through the three-attempt limit and emitted `RADARR_BLOCKLIST_BLOCKED`: *Leaves of Grass* (2009), *Keeping the Faith* (2000), *The French Dispatch* (2021), *Motherless Brooklyn* (2019), *Isle of Dogs* (2018) and *Sausage Party* (2016). The grouped critical notification for the first two items and the notification for the remaining four were both acknowledged by Apprise with HTTP 200. Radarr subsequently selected alternate releases for the first five titles; those five alternatives reached `ADDED verification=usable-file-stats`. The `Sausage Party` HDRip 480p alternative remained unresolved at the last fully observed log point and is still to be rechecked.
+
+**Operational status detail:** in v1.3.4, the importer returns exit code 1 from a cycle when one or more verification failures are reported, even if those rows remain in `retry_wait` and the systemd timer is still active. This can mark the oneshot service as `failed` without stopping the timer or invalidating a separate `RADARR_BLOCKLIST_BLOCKED` result. Treat this as a distinct exit-status/observability issue.
 
 ## Seerr Watchlist tracking (v1.3.0)
 
@@ -113,7 +115,7 @@ Use the HISTORY and SNAPSHOT log lines first.
 | FAILED | The candidate reached the add attempt but failed. Read the sanitized error and check API reachability, authorization and the TorrServer response. |
 | candidates=0 | No eligible new hashes were found under the current filtering rule. It is not in itself an error. |
 
-## Asynchronous add verification (strict FileStats criterion; candidate v1.3.4)
+## Asynchronous add verification (strict FileStats criterion; installed v1.3.4)
 
 An `ADD_ACCEPTED` log entry means TorrServer acknowledged the request; it is not a completed import. `ADDED` is logged only when the exact hash exposes a non-empty usable `FileStats` list. Each item must have a positive unique file ID and a unique safe relative path. The status string (`Torrent added`, `Torrent getting info`, `Torrent working` or `Torrent in db`) and `action=list` membership alone are not sufficient.
 
@@ -133,7 +135,7 @@ To explicitly re-queue exhausted unverified attempts for one source instance, ru
 
 Do not combine --retry-failed with --dry-run. This option re-queues only failed unverified attempts for the selected instance; it does not clear successful import history or automatically restore confirmed user-removed torrents. Use --rebuild only for intentional historical repopulation.
 
-In the v1.3.4 candidate, verification means usable `FileStats` are available for the exact hash. This establishes that the downstream importer can inspect a file structure; it does not itself guarantee successful playback, seeding or durable disk commit.
+In v1.3.4, verification means usable `FileStats` are available for the exact hash. This establishes that the downstream importer can inspect a file structure; it does not itself guarantee successful playback, seeding or durable disk commit.
 
 ## API and authentication errors
 
