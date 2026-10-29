@@ -3,6 +3,8 @@
 This guide covers initial setup and the controlled in-place update procedure for the v1.3.4 FileStats-verification revision. The update was performed on MINI-Ubuntu on 2026-10-29. Adapt the four-instance examples to the actual addresses, ports and API keys in your installation.
 
 > **Confirmed deployment status (2026-10-29):** `/opt/torr-arr-importer/importer.py --version` returns `1.3.4`. Its SHA-256 is `cb10e78ab5f9e94d36af5cb77622ad86601a505bb1410f85bbe458d3dd82c3f4`, matching source commit `78ba4801e5e1fc3cfdc4cb620e2e55853e61573c`. The update replaced only `importer.py`; TOML files, SQLite state and systemd units were preserved and a backup was saved under `/tmp/arr2torr-v1.3.3-backup.l78Rxu`. The strict `FileStats` criterion and Radarr terminal blocklist path have been live-validated; see the [Roadmap](../ROADMAP.md) and [Operations](OPERATIONS.md). PR #4 remains open and no official v1.3.4 Git tag/release has been published.
+>
+> **Config follow-up:** the current `/etc/torr-arr-importer/radarr-1080.toml` was checked and omits `radarr_blocklist_enabled`, so the current runtime relies on the backward-compatible code default `true`. Keep this setting explicit in active Radarr configs; the command in the blocklisting section shows the required line.
 
 ## Requirements
 
