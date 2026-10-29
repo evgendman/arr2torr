@@ -2026,8 +2026,13 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                     continue
 
                 # If a persisted DB-only entry is not active, re-add only to activate its metadata.
+                # Never issue even this activation request after the verification deadline expired.
                 # A live object is inspected via action=get; it is never blindly added again.
-                if status == "pending" and record is not None:
+                current_deadline = pending_deadline(pending)
+                verification_window_open = (
+                    current_deadline is None or datetime.now(timezone.utc) < current_deadline
+                )
+                if status == "pending" and record is not None and verification_window_open:
                     attempt_count = int(pending.get("attempt_count") or 0)
                     if is_db_only_record(record):
                         current_grab = grabs_by_hash.get(h)
