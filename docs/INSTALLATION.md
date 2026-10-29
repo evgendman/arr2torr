@@ -1,8 +1,8 @@
 # Installation and configuration
 
-This guide includes initial setup and a controlled in-place update path for the v1.3.4 FileStats-verification candidate. MINI-Ubuntu remains on v1.3.3 until the candidate is separately approved and live-validated. The four-instance examples must be adapted to the actual addresses, ports and API keys in your installation.
+This guide covers initial setup and the controlled in-place update procedure for the v1.3.4 FileStats-verification revision. The update was performed on MINI-Ubuntu on 2026-10-29. Adapt the four-instance examples to the actual addresses, ports and API keys in your installation.
 
-> **Known deployment status (2026-10-29):** v1.3.3 is installed on MINI-Ubuntu from PR #4 branch `feature/radarr-blocklist-v1.3.2`. The code-only deployment replaced `importer.py` and preserved configuration, SQLite state and systemd units. The ordinary Radarr timer path passed a 10-hour log review (115 runs, 79 adds confirmed by list membership under the old criterion, zero failed additions). The terminal-failure-to-Radarr-blocklist path remains unverified. The v1.3.4 steps below describe a candidate only; they do not authorize or claim a deployment.
+> **Confirmed deployment status (2026-10-29):** `/opt/torr-arr-importer/importer.py --version` returns `1.3.4`. Its SHA-256 is `cb10e78ab5f9e94d36af5cb77622ad86601a505bb1410f85bbe458d3dd82c3f4`, matching source commit `78ba4801e5e1fc3cfdc4cb620e2e55853e61573c`. The update replaced only `importer.py`; TOML files, SQLite state and systemd units were preserved and a backup was saved under `/tmp/arr2torr-v1.3.3-backup.l78Rxu`. The strict `FileStats` criterion and Radarr terminal blocklist path have been live-validated; see the [Roadmap](../ROADMAP.md) and [Operations](OPERATIONS.md). PR #4 remains open and no official v1.3.4 Git tag/release has been published.
 
 ## Requirements
 
@@ -29,9 +29,9 @@ The installer does not enable timers automatically. Configure and test an instan
 > API keys belong only in local files under /etc/torr-arr-importer/. Never commit a populated config to Git.
 
 
-## Upgrade from installed v1.3.3 to candidate v1.3.4 in place (not yet deployed)
+## In-place upgrade procedure from v1.3.3 to v1.3.4 (used on MINI-Ubuntu, 2026-10-29)
 
-**Important:** this is a prepared candidate, not an instruction to deploy automatically. Review the release and complete deliberate, controlled live validation before production use. v1.3.4 requires usable TorrServer `FileStats` before it records success, while retaining Radarr's terminal-failure blocklist behavior after the configured `max_add_attempts` count. A permanent API rejection before that limit is not blocklisted. Sonarr behavior is unchanged.
+**Important:** the procedure below records the controlled v1.3.4 code-only update performed on MINI-Ubuntu. Do not rerun it there without a deliberate new upgrade/rollback plan; for another host, review and authorize deployment separately. v1.3.4 requires usable TorrServer `FileStats` before recording success and retains Radarr's terminal-failure blocklist behavior after `max_add_attempts`. A permanent API rejection before that limit is not blocklisted. Sonarr behavior is unchanged.
 
 The v1.3.4 candidate adds `metadata_activation_attempt` to `pending_adds` through an in-place SQLite migration; it does not clear or recreate the database. Existing v1.3.3 success-history rows are not automatically reclassified because that version did not record how success was verified. Missing historical hashes remain protected from automatic resurrection. **Do not delete `/var/lib/torr-arr-importer/state.db`.**
 
@@ -46,7 +46,7 @@ The v1.3.4 candidate adds `metadata_activation_attempt` to `pending_adds` throug
        python3 "$SRC/src/importer.py" --version
        printf '%s\n' "$SRC" > /tmp/arr2torr-v1.3.4-source-path
 
-   The expected version output is `1.3.4`. This pinned source tree passed GitHub Actions [run #111](https://github.com/evgendman/arr2torr/actions/runs/40833149341) on Python 3.11 and 3.12 with 49 tests. Continue only after separately approving live validation/deployment.
+   The expected version output is `1.3.4`. This pinned source tree passed GitHub Actions [run #111](https://github.com/evgendman/arr2torr/actions/runs/40833149341) on Python 3.11 and 3.12 with 49 tests. The subsequent PR documentation updates left Python source and tests unchanged; [run #117](https://github.com/evgendman/arr2torr/actions/runs/40833440612) also passed on Python 3.11 and 3.12 with 49 tests.
 
 2. Inspect the live timer state first. Stop only the profile timers that are active and are actually being upgraded. On MINI-Ubuntu at the 2026-10-29 check, `radarr-1080` was active and `sonarr-1080` was inactive; no active 4K timer was reported. For that host, stop and drain only Radarr 1080p:
 
