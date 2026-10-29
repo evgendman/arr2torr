@@ -1,6 +1,6 @@
 # Installation and configuration
 
-The instructions below describe the v1.3.3 in-place update, including Radarr terminal-failure blocklisting, list-membership confirmation and stale-state reconciliation, plus optional Seerr Watchlist integration. The four-instance examples are intended to be adapted to the actual addresses, ports and API keys in your installation.
+This guide includes initial setup, the historical v1.3.3 deployment procedure and a controlled in-place update path for the v1.3.4 FileStats-verification candidate. MINI-Ubuntu remains on v1.3.3 until the candidate is separately approved and live-validated. The four-instance examples must be adapted to the actual addresses, ports and API keys in your installation.
 
 > **Known deployment status (2026-10-29):** v1.3.3 is already installed on MINI-Ubuntu from PR #4 branch `feature/radarr-blocklist-v1.3.2` for controlled live validation. The code-only install replaced `importer.py` and preserved configuration, SQLite state and systemd units. The ordinary Radarr timer path passed a 10-hour log review (115 completed runs, 79 list-confirmed adds, zero failed additions). The terminal-failure-to-Radarr-blocklist path remains unverified; do not read this historical upgrade procedure as an instruction to reinstall the already-installed code.
 
@@ -29,23 +29,23 @@ The installer does not enable timers automatically. Configure and test an instan
 > API keys belong only in local files under /etc/torr-arr-importer/. Never commit a populated config to Git.
 
 
-## Upgrade from v1.3.2 to v1.3.3 in place
+## Upgrade from installed v1.3.3 to candidate v1.3.4 in place (not yet deployed)
 
-**Important:** review the proposed release and complete a deliberate, controlled live Radarr validation before deploying it to production. v1.3.3 preserves Radarr's native failed-download/blocklist handling by default, after the configured `max_add_attempts` count is reached. A permanent API rejection before that attempt count is reached is not blocklisted. Sonarr behavior is unchanged.
+**Important:** this is a prepared candidate, not an instruction to deploy automatically. Review the release and complete deliberate, controlled live validation before production use. v1.3.4 requires usable TorrServer `FileStats` before it records success, while retaining Radarr's terminal-failure blocklist behavior after the configured `max_add_attempts` count. A permanent API rejection before that limit is not blocklisted. Sonarr behavior is unchanged.
 
-The v1.3.2 schema migration remains in place; v1.3.3 does not reset the database or add new schema fields. On the next normal importer run, it removes stale pending rows whose hashes already exist in successful import history, and re-arms a terminal-failed row only when the current Radarr history has a strictly newer Grab ID for that same hash. It does not rebuild import history. **Do not delete `/var/lib/torr-arr-importer/state.db`.**
+The v1.3.4 candidate adds `metadata_activation_attempt` to `pending_adds` through an in-place SQLite migration; it does not clear or recreate the database. Existing v1.3.3 success-history rows are not automatically reclassified because that version did not record how success was verified. Missing historical hashes remain protected from automatic resurrection. **Do not delete `/var/lib/torr-arr-importer/state.db`.**
 
 1. Prepare the exact tested candidate in a temporary directory and run the checks:
 
        set -euo pipefail
-       SRC="$(mktemp -d /tmp/arr2torr-v1.3.3.XXXXXX)"
+       SRC="$(mktemp -d /tmp/arr2torr-v1.3.4.XXXXXX)"
        git clone --branch feature/radarr-blocklist-v1.3.2 https://github.com/evgendman/arr2torr.git "$SRC"
        python3 -m py_compile "$SRC/src/importer.py"
        (cd "$SRC" && python3 -m unittest discover -s tests -v)
        python3 "$SRC/src/importer.py" --version
-       printf '%s\n' "$SRC" > /tmp/arr2torr-v1.3.3-source-path
+       printf '%s\n' "$SRC" > /tmp/arr2torr-v1.3.4-source-path
 
-   The expected version output is `1.3.3`; confirm the current CI run is green on Python 3.11 and 3.12 before deployment. Use this path only after the candidate has been approved for live validation/deployment.
+   The expected version output is `1.3.4`; confirm the latest CI run passes on Python 3.11 and 3.12 before deployment. At preparation time, the candidate test workflow passed on both versions. Continue only after separately approving live validation/deployment.
 
 2. Inspect the live timer state first. Stop only the profile timers that are active and are actually being upgraded. On MINI-Ubuntu at the 2026-10-29 check, `radarr-1080` was active and `sonarr-1080` was inactive; no active 4K timer was reported. For that host, stop and drain only Radarr 1080p:
 
@@ -57,7 +57,7 @@ The v1.3.2 schema migration remains in place; v1.3.3 does not reset the database
 3. Back up the currently installed program, local configs, systemd units and the SQLite state before running the installer. Keep the backup under `/tmp` and retain its path:
 
        set -euo pipefail
-       BACKUP="$(mktemp -d /tmp/arr2torr-v1.3.2-backup.XXXXXX)"
+       BACKUP="$(mktemp -d /tmp/arr2torr-v1.3.3-backup.XXXXXX)"
        sudo install -d -m 0700 "$BACKUP"
        sudo cp -a /opt/torr-arr-importer/importer.py "$BACKUP/importer.py"
        sudo cp -a /etc/torr-arr-importer "$BACKUP/config"
@@ -74,13 +74,13 @@ The v1.3.2 schema migration remains in place; v1.3.3 does not reset the database
        dst.close()
        src.close()
        PY
-       printf '%s\n' "$BACKUP" > /tmp/arr2torr-v1.3.2-backup-path
+       printf '%s\n' "$BACKUP" > /tmp/arr2torr-v1.3.3-backup-path
        echo "Backup saved under: $BACKUP"
 
 4. Install the staged source. The installer preserves existing API keys/configuration values and does not clear the state database:
 
-       SRC="$(cat /tmp/arr2torr-v1.3.3-source-path)"
-       sudo bash "$SRC/install.sh"
+       SRC="$(cat /tmp/arr2torr-v1.3.4-source-path)"
+       sudo install -o root -g root -m 0755 "$SRC/src/importer.py" /opt/torr-arr-importer/importer.py
        /opt/torr-arr-importer/importer.py --version
        sudo cmp "$SRC/src/importer.py" /opt/torr-arr-importer/importer.py
 
@@ -95,7 +95,7 @@ The v1.3.2 schema migration remains in place; v1.3.3 does not reset the database
        sudo systemctl start torr-arr-importer@radarr-1080.timer
        systemctl list-timers 'torr-arr-importer@*' --all --no-pager
 
-For rollback, stop only those timers and restore the backed-up `importer.py` and unit files, then run `sudo systemctl daemon-reload` and start the same timers again. Do **not** restore an older SQLite backup as a routine rollback step: the added columns are backward-compatible, and overwriting the live DB could discard importer state created since the backup. Review the saved config backup separately if any configuration was changed.
+For rollback, stop only those timers, restore the backed-up `importer.py`, and start the same timers again. This code-only update does not change systemd units, so `daemon-reload` is not required. Do **not** restore an older SQLite backup as a routine rollback step: the additive schema column is backward-compatible, and overwriting the live DB could discard importer state created since the backup. Review saved config/unit backups separately only if they were deliberately changed.
 
 ## 2. Instance naming and profiles
 
