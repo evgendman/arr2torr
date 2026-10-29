@@ -2159,12 +2159,6 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
             # explicitly reactivated only when the snapshot says the object is DB-only.
             candidates.append(grab)
 
-        logging.info(
-            "SNAPSHOT source=%s arr_grabbed=%d torrserver=%d import_history_known=%d pending=%d candidates=%d present_incomplete=%d mode=%s",
-            cfg.name, history_count, len(ts_hashes), known_count, len(pending_map), len(candidates),
-            present_incomplete, "rebuild" if rebuild else "normal",
-        )
-
         skipped_present = sum(1 for grab in grabs if verification_evidence(ts_by_hash.get(grab.hash)))
         present_incomplete = sum(
             1 for grab in grabs
@@ -2174,6 +2168,11 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
             1 for grab in grabs
             if not verification_evidence(ts_by_hash.get(grab.hash))
             and not rebuild and grab.hash in imported_hashes
+        )
+        logging.info(
+            "SNAPSHOT source=%s arr_grabbed=%d torrserver=%d import_history_known=%d pending=%d candidates=%d present_incomplete=%d mode=%s",
+            cfg.name, history_count, len(ts_hashes), known_count, len(pending_map), len(candidates),
+            present_incomplete, "rebuild" if rebuild else "normal",
         )
 
         if dry_run:
