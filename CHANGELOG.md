@@ -7,7 +7,7 @@
 - Inspect present-but-incomplete live torrents via `action=get` without blindly resending `action=add`. For DB-only records, allow bounded metadata activation no more than once per verification attempt, then continue polling for usable `FileStats`.
 - Keep absent-hash retries separate from present-but-incomplete metadata recovery. Add a SQLite marker for metadata activation and migrate it in place; do not reset existing import history or deployment state.
 - Add regression coverage for malformed/missing `FileStats`, delayed readiness, DB-only activation, live incomplete hashes, absent-versus-present retry handling, and `action=get` HTTP 404 behavior.
-- GitHub Actions [run #103](https://github.com/evgendman/arr2torr/actions/runs/40830665619) passed on Python 3.11 and 3.12 (49 unit tests, compile step and version check; reported version `1.3.4`).
+- GitHub Actions [run #111](https://github.com/evgendman/arr2torr/actions/runs/40833149341) passed on Python 3.11 and 3.12 (49 unit tests, compile step and version check; reported version `1.3.4`).
 - This is a code candidate on PR #4, not a tagged release or live deployment. MINI-Ubuntu remains on v1.3.3 until separately authorized and live-validated.
 
 ## torr-arr-importer v1.3.3 (installed from PR #4 branch for controlled live validation; PR remains open)
