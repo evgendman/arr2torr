@@ -40,12 +40,13 @@ The v1.3.4 candidate adds `metadata_activation_attempt` to `pending_adds` throug
        set -euo pipefail
        SRC="$(mktemp -d /tmp/arr2torr-v1.3.4.XXXXXX)"
        git clone --branch feature/radarr-blocklist-v1.3.2 https://github.com/evgendman/arr2torr.git "$SRC"
+       git -C "$SRC" checkout --detach 78ba4801e5e1fc3cfdc4cb620e2e55853e61573c
        python3 -m py_compile "$SRC/src/importer.py"
        (cd "$SRC" && python3 -m unittest discover -s tests -v)
        python3 "$SRC/src/importer.py" --version
        printf '%s\n' "$SRC" > /tmp/arr2torr-v1.3.4-source-path
 
-   The expected version output is `1.3.4`; confirm the latest CI run passes on Python 3.11 and 3.12 before deployment. At preparation time, the candidate test workflow passed on both versions. Continue only after separately approving live validation/deployment.
+   The expected version output is `1.3.4`. This pinned source tree is the candidate checked by GitHub Actions run [#111](https://github.com/evgendman/arr2torr/actions/runs/40833149341); confirm that run finishes green on Python 3.11 and 3.12 before deployment. Continue only after separately approving live validation/deployment.
 
 2. Inspect the live timer state first. Stop only the profile timers that are active and are actually being upgraded. On MINI-Ubuntu at the 2026-10-29 check, `radarr-1080` was active and `sonarr-1080` was inactive; no active 4K timer was reported. For that host, stop and drain only Radarr 1080p:
 
