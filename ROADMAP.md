@@ -288,7 +288,7 @@ Reduce manual intervention by automatically excluding a release from future Rada
 
 **Configuration and scope**
 
-- Add radarr_blocklist_enabled, defaulting to true in the code and in Radarr example configs. Set it to false to opt out.
+- Include `radarr_blocklist_enabled = true` explicitly in all Radarr example TOMLs and in each active Radarr config. The code's `true` default when the key is absent is retained only for backward compatibility; set it to `false` only as a deliberate opt-out.
 - Apply this feature to Radarr only. Sonarr behavior remains unchanged.
 - Use the supported native endpoint POST /api/v3/history/failed/{historyId} for the exact Grab history record. The current Radarr API does not expose a direct blocklist-creation POST endpoint; do not invent POST /api/v3/blocklist.
 - This native failed-history action deliberately invokes Radarr's ordinary failure pipeline; any replacement search follows the user's Radarr settings.
