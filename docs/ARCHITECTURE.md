@@ -1,6 +1,6 @@
 # Architecture and state model
 
-This document describes the installed torr-arr-importer v1.3.3 code and data mapping. It preserves terminal-only notifications and durable Apprise-delivery retries, confirms successful adds by observing exact infohash membership in TorrServer's subsequent action=list response, and implements default-enabled Radarr blocklisting after terminal add/verification failure. Ordinary live adds have been validated on MINI-Ubuntu; the real terminal-failure-to-blocklist path remains unverified.
+This document describes the v1.3.4 code candidate and its state model. The candidate preserves terminal-only notifications, durable Apprise-delivery retries and default-enabled Radarr blocklisting, but replaces list-membership confirmation with validation of usable `FileStats`. MINI-Ubuntu remains on v1.3.3; the candidate has passed GitHub Actions on Python 3.11/3.12 but has not been live-validated against TorrServer.
 
 ## 1. Source of truth
 
@@ -68,20 +68,16 @@ The source and receiver snapshots are independent: Arr history tells us what was
 Let:
 
 - **A** = unique infohashes with usable Grabbed records in the configured Arr history;
-- **T** = infohashes currently returned by TorrServer;
+- **S** = infohashes in the current TorrServer snapshot whose records contain usable `FileStats`;
 - **I** = infohashes in the shared SQLite import-history table.
 
-Normal mode:
+Normal mode treats hashes in **S** as already ready and preserves historical entries in **I**:
 
-    Candidates = A − T − I
+    New candidates = A − S − I
 
-A hash is not a candidate if it is already in TorrServer or if this importer family has successfully imported it before.
+A hash present in TorrServer but without usable `FileStats` is not treated as ready. If it is not already in successful history, it enters the metadata-observation/recovery path; a live object is inspected using `action=get` instead of blindly adding it again. A `Torrent in db` record may receive one metadata-activation request per verification attempt.
 
-Rebuild mode:
-
-    Candidates = A − T
-
-The --rebuild option ignores the historical exclusion **I**, but still checks current TorrServer membership. It does not truncate or recreate the SQLite database.
+Rebuild mode ignores the historical exclusion **I**, but still distinguishes ready hashes in **S** from present-but-incomplete hashes. It does not truncate or recreate the SQLite database.
 
 This distinction is central to the user-removal policy. If a previously imported torrent is deliberately removed from TorrServer, normal mode sees it in **I** but not **T** and will skip it instead of silently restoring it. A manual rebuild expresses a new decision to repopulate any missing Grabbed items still present in Arr history.
 
@@ -91,7 +87,9 @@ Every systemd instance uses its own configuration and default lock file, but the
 
     /var/lib/torr-arr-importer/state.db
 
-The database records a successfully imported hash only after the exact hash appears in a subsequent TorrServer `action=list` response. The same record includes diagnostic fields such as source instance, Arr history/media IDs, title and available provider IDs.
+The v1.3.4 candidate records a new successful import only after the exact hash exposes a non-empty `FileStats` list with positive unique file IDs and unique safe relative paths. The same SQLite record includes diagnostic fields such as source instance, Arr history/media IDs, title and available provider IDs.
+
+The v1.3.3 `imports` table does not record the verification method. For that reason, the candidate does not automatically reclassify old success rows or resurrect missing hashes; the 32 items affected by the old list-only rule need a separate, cautious reassessment.
 
 The shared database is not an independent inventory of TorrServer. TorrServer membership is always checked separately. Its purpose is to remember intentional prior imports even after a user removes a torrent from TorrServer.
 
@@ -165,20 +163,22 @@ target_quality is descriptive configuration data. It represents which Arr lane c
 ## 9. Duplicate, retry and failure behavior
 
 - One newest Arr history row is retained per hash before candidate selection.
-- TorrServer presence is checked before each add. The in-memory TorrServer hash set is updated after a successful add, so another occurrence of the same hash in the same run is skipped.
+- A hash with usable `FileStats` is considered ready. A hash present without usable `FileStats` is not considered imported just because TorrServer lists it.
+- Present-but-incomplete live objects are inspected with `action=get`; the importer does not blindly send a duplicate add. A `Torrent in db` record may get one metadata-activation request per verification attempt, but never after that attempt's verification deadline.
+- A missing hash may be added or retried. An incomplete live object is re-observed instead; if it disappears and the verification deadline expires, the normal bounded retry policy applies.
 - Permanent HTTP 4xx responses, including 401/403, are not retried.
 - HTTP 408, 429, 5xx and network failures can be retried according to retry_count and retry_delay.
 - API-like URL query credentials are redacted in logs/exceptions.
 - Each instance has its own process lock, so overlapping runs of that instance do not run concurrently.
-- Failed candidate additions are logged with the hash and a sanitized error; successful additions are recorded in SQLite only after the exact hash is observed in a subsequent TorrServer `action=list` response.
-- --dry-run prints candidate decisions and media identifiers but does not add torrents or record successful imports.
+- Successful new/pending imports are recorded in SQLite only after usable `FileStats` is observed for the exact hash.
+- `--dry-run` prints candidate decisions and media identifiers but does not add torrents or record successful imports.
 
-### Radarr blocklist behavior in v1.3.3 (live terminal-path validation pending)
+### Radarr blocklist behavior retained in the v1.3.4 candidate (live terminal-path validation pending)
 
 - The opt-out setting radarr_blocklist_enabled defaults to true for Radarr and is ignored by Sonarr.
 - Only pending_adds rows with status = 'failed' and attempt_count >= max_add_attempts are eligible. A row marked failed by a permanent API rejection before reaching the configured count is saved as skipped_attempt_limit and is not blocklisted. Rows in retry_wait and permanent preparation failures before a TorrServer add are excluded.
 - The importer calls POST /api/v3/history/failed/{arr_history_id} so Radarr can execute its native failed-download event path and add the exact history Grab to the blocklist. This is not a direct POST /api/v3/blocklist operation; the public API has no blocklist creation endpoint.
-- The outcome is persisted in pending_adds.radarr_blocklist_status, radarr_blocklist_last_error, and radarr_blocklist_verify_misses. These columns are added in-place.
+- The outcome is persisted in `pending_adds.radarr_blocklist_status`, `radarr_blocklist_last_error`, and `radarr_blocklist_verify_misses`. The v1.3.4 candidate additionally adds `metadata_activation_attempt` in-place to bound DB-only metadata activation.
 - On first migration, old rows already marked failed are assigned legacy_skipped. This intentionally prevents updating the code from retrospectively acting on a batch of old failures. Newly terminal rows use the default NULL state and are processed.
 - HTTP/network results that do not establish whether Radarr completed the failed-history action enter verify_pending. Later runs query /api/v3/blocklist/movie?movieId=...; because the public resource does not expose a torrent hash, recovery can only compare the source release title. The importer does not automatically repeat the non-idempotent failed-history POST.
 - The blocklist result is appended to the existing terminal Apprise failure summary, when notifications are enabled; separate blocklist-only alerts are not emitted. The skipped_attempt_limit outcome is explained in the same message.
