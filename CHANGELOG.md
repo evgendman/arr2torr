@@ -2,6 +2,8 @@
 
 ## torr-arr-importer v1.3.4 (installed on MINI-Ubuntu; PR #4 not yet merged/tagged)
 
+- Configuration convention: explicitly set `radarr_blocklist_enabled = true` in each active Radarr TOML. The code fallback to `true` when the key is absent remains only for backward compatibility; the setting is visible in both Radarr example configs. Sonarr configs do not use this Radarr-only setting.
+
 - Require a usable, non-empty TorrServer `FileStats` list for the exact infohash before confirming a successful import. Validate positive unique file IDs and unique safe relative paths.
 - Treat the add response and `action=list` hash membership as intermediate signals only; `Torrent added`, `Torrent getting info`, `Torrent working` and `Torrent in db` are not sufficient success evidence by themselves.
 - Inspect present-but-incomplete live torrents via `action=get` without blindly resending `action=add`. For DB-only records, allow bounded metadata activation no more than once per verification attempt, then continue polling for usable `FileStats`.
