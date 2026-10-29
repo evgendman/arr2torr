@@ -6,8 +6,9 @@ This document separates the installed torr-arr-importer revision, observed live 
 
 - **Installed code:** `torr-arr-importer 1.3.3` on MINI-Ubuntu, deployed from PR #4 branch `feature/radarr-blocklist-v1.3.2` at commit `7e8feb7`. The code-only deployment replaced `/opt/torr-arr-importer/importer.py`; configuration files, SQLite state and systemd units were preserved.
 - **Regression tests and CI:** the full local suite passed **42 tests**. GitHub Actions run [#89](https://github.com/evgendman/arr2torr/actions/runs/40748346991) passed on Python 3.11 and 3.12. PR #4 remains open and unmerged; this is the installed test candidate, not a claim that a tagged release has been published.
-- **Live timer run review:** for the 10-hour journal window ending 2026-10-29 09:45 (+05:00), the Radarr importer completed **115 runs**. It submitted **79** add requests; all 79 were confirmed by exact infohash membership in a later TorrServer `action=list` response. There were **0 failed additions**, no `ERROR`/exception entries and no `RADARR_BLOCKLIST_*` or `APPRISE_*` events. The six `REARMED_NEW_GRAB` warnings and five `PENDING_CLEARED` events in the window were expected reconciliation actions. No terminal transfer failure occurred in this window, so terminal Apprise delivery was not exercised.
-- **Zero-seed test outcome:** `Viking Quest (2014) BDRip 720p | P2` was accepted and appeared in TorrServer's list on the first attempt. By the configured contract this is a successful add, even if the swarm has no seeds; it did not exercise terminal failure or blocklisting.
+- **Live timer run review (historical criterion):** for the 10-hour journal window ending 2026-10-29 09:45 (+05:00), the Radarr importer completed **115 runs**. It submitted **79** add requests; all 79 were confirmed by exact infohash membership in a later TorrServer `action=list` response. There were **0 failed additions**, no `ERROR`/exception entries and no `RADARR_BLOCKLIST_*` or `APPRISE_*` events. This establishes list membership under the then-current criterion, but not that all those imports had usable file metadata.
+- **Zero-seed test outcome:** `Viking Quest (2014) BDRip 720p | P2` was accepted and appeared in TorrServer's list on the first attempt. This confirmed list membership only; it did not prove that `FileStats` was available or exercise terminal failure/blocklisting.
+- **Corrective finding after manual retry (2026-10-29, 10:41 +05):** `--retry-failed` re-queued **32** terminal rows. v1.3.3 logged `added=32 failed=0` because each exact hash appeared in `action=list`. Subsequent `torr2strm` warnings reported missing file metadata or HTTP 404 for several titles in that batch, including *Inside Out (2015)*, *Sabrina The Teenage Witch*, *The Adam Project* and *Turbo*. Therefore, list membership alone is an insufficient success criterion. The installed v1.3.3 code still has this weak criterion; this roadmap update documents the required correction but does not implement or deploy code changes.
 - **Still open:** select a release that remains absent from TorrServer's list after all three configured add/verification attempts. Verify that the importer reaches terminal failure, Radarr's native failed-history pipeline actually records the release in its blocklist, and the single grouped critical Apprise message reports the outcome and delivery state. Until that controlled case passes, live blocklist behavior is **not validated**.
 
 ## Implemented
@@ -25,7 +26,7 @@ This document separates the installed torr-arr-importer revision, observed live 
 - --dry-run and --rebuild.
 - Protection against automatic re-adding after a user removes a known imported torrent from TorrServer.
 - Useful summary logs (HISTORY, SNAPSHOT, ADD, ADD_ACCEPTED, ADDED, VERIFY_FAILED, FAILED, DONE).
-- Batch verification of accepted add requests with per-hash deadlines and shared polling; v1.3.3 records success only after the exact hash is observed in TorrServer's subsequent action=list response.
+- Batch verification of accepted add requests with per-hash deadlines and shared polling. The installed v1.3.3 implementation records success on `action=list` hash membership only; follow-up live evidence showed that criterion is insufficient. The required `FileStats` criterion is tracked as corrective work in item 7 below.
 - Atomic pending claims across Arr instances, persistent retry state, bounded exponential backoff and explicit --retry-failed recovery.
 - Terminal-only grouped critical Apprise messages with persistent delivery retry state, independent of TorrServer retry state.
 - Optional Seerr Watchlist tracking for terminal transfer failures.
@@ -201,19 +202,26 @@ Add tests for:
 - [x] concurrent pending-claim guard and retry-limit/backoff transitions;
 - transient vs permanent HTTP status handling.
 
-### 7. Confirm successful additions by TorrServer list membership
+### 7. Confirm successful additions only after usable TorrServer FileStats are available
 
-**Status: implemented in v1.3.3.** The 42-test suite and GitHub Actions passed, and the ordinary Radarr timer path was live-validated on MINI-Ubuntu on 2026-10-29. Terminal-failure/blocklist behavior is tracked separately in item 10.
+**Status: corrective work required.** Installed v1.3.3 uses exact hash membership in `action=list` as success. The 2026-10-29 manual retry showed that this can mark a torrent successful even though later `torr2strm` cannot obtain its file structure or even find the hash by `action=get`. Do not treat the current list-only criterion as the desired final behavior.
 
-The initial `POST /torrents` acknowledgement is not enough to record an import. The importer must observe the exact infohash in a subsequent TorrServer `action=list` response. This is deliberately a **list-membership** criterion only; it does not establish that the swarm has peers, metadata is fully ready, playback will work or data is durably committed to disk.
+**Required success contract**
 
-- [x] Treat the initial add response as an acknowledgement, not final success.
-- [x] Submit eligible candidates first and verify pending hashes through a shared polling loop with individual deadlines.
-- [x] Promote an item to successful-import history only after the exact hash is observed in a later `action=list` response.
-- [x] Persist pending attempts, bound retries/backoff, reconcile state after restarts and preserve the intentional-removal safeguard.
-- [x] Cover membership confirmation, stale pending cleanup and newer Grab re-arming with regression tests.
-- [x] Live-validate ordinary ingestion: the 10-hour log review found 79 add requests and 79 post-add list confirmations, with no failed additions.
-- [ ] Live-validate a release that remains absent from TorrServer's list through all three attempts and confirm terminal failure triggers the Radarr blocklist and grouped Apprise outcome. A zero-seed release that appears in the list does not satisfy this criterion.
+The immediate `POST /torrents` response is only an acknowledgement that the request was accepted. Seeing the exact hash in `action=list` is also only an intermediate presence signal, not final success. Additions must remain pending until TorrServer exposes a usable, non-empty `FileStats` list for the exact hash. Entries must have positive unique file IDs and unique, safe relative paths sufficient for downstream tree generation. Do not infer success from `Torrent added`, `Torrent getting info`, `Torrent working`, or `Torrent in db` alone; only usable `FileStats` satisfy the downstream contract.
+
+When a hash is listed without usable `FileStats`, keep checking its details within the configured deadline. For a DB-only `Torrent in db` record, explicitly trigger/continue metadata activation through the supported TorrServer path and then poll for usable `FileStats`; do not count the DB record alone as success. Do not blindly issue duplicate add requests while a live object still exists. If the deadline expires without usable `FileStats`, do not promote the hash into successful-import history; persist the unresolved attempt and use the bounded retry policy. A retry must distinguish an absent hash (eligible for another add) from a present but metadata-incomplete hash (requires metadata recovery/re-observation). Keep the existing intentional-removal safeguard and terminal failure/blocklist/notification behavior.
+
+- [x] Treat the immediate add response as an acknowledgement, not final success.
+- [x] Submit eligible candidates first and use shared polling with individual deadlines.
+- [ ] Make exact-hash presence in `action=list` an intermediate signal only; require usable `FileStats` before promoting an item to successful-import history.
+- [ ] Handle `Torrent added` / `Torrent getting info` as incomplete states; do not accept `Torrent working` or `Torrent in db` alone without usable `FileStats`.
+- [ ] Implement and test the metadata-recovery path for DB-only/present-but-incomplete hashes without blind duplicate adds.
+- [ ] Preserve bounded retries and terminal-failure handling when `FileStats` never arrives; never write such a hash into successful-import history.
+- [ ] Update regression tests for hash-visible-without-FileStats, delayed FileStats, metadata timeout, disappearance/HTTP 404, DB-only recovery and the absent-versus-present retry distinction.
+- [ ] Live-validate that a newly added release enters successful-import history only after usable `FileStats` is exposed and is then processed by `torr2strm`.
+- [ ] Reassess the 2026-10-29 batch of 32 re-queued items against usable `FileStats`; the earlier 32/32 list-presence result is not sufficient evidence of successful downstream readiness.
+- [ ] Separately live-validate a release that remains without usable `FileStats` through all three configured attempts and confirm terminal failure triggers the Radarr blocklist and grouped critical Apprise outcome.
 
 ### 8. Coordinate with the downstream STRM/NFO project
 
