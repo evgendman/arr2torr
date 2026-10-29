@@ -66,7 +66,7 @@ That means different versions of one movie or series can coexist in TorrServer. 
 
 ## Radarr/Sonarr blocklisting after terminal TorrServer failure
 
-Radarr's native failed-history path is implemented and was live-validated on MINI-Ubuntu on 2026-10-29. Sonarr support is added in the v1.3.5 candidate branch but has not yet been installed or live-validated.
+Radarr's native failed-history path was live-confirmed on MINI-Ubuntu on 2026-10-29. Sonarr's v1.3.5 path also ran live that day: five failed series-release choices logged `SONARR_BLOCKLIST_BLOCKED`. The next importer cycle verified replacement additions for Outer Banks S01, Outer Banks S03 and Dark S03. The native blocklist feature is considered live-validated for both apps; replacement search and results remain dependent on each application's settings and the releases available to it.
 
 Every Radarr example TOML explicitly sets `radarr_blocklist_enabled = true`; every Sonarr example TOML explicitly sets `sonarr_blocklist_enabled = true`. Use the matching explicit setting in each active profile. Missing keys default to `true` for backward compatibility, not as a replacement for visible operational configuration. Set the corresponding flag to `false` only when intentionally disabling that application's blocklist behavior.
 
@@ -84,7 +84,7 @@ For ambiguous-result recovery, Radarr looks up `/api/v3/blocklist/movie?movieId=
 
 Each application's status/error/verification counters are kept in separate SQLite columns and migrated in place. On first migration, pre-existing failed rows are marked `legacy_skipped`; do not reset the database. Explicitly re-arming an exhausted TorrServer attempt with `--retry-failed` resets that instance's state.
 
-The blocklist outcome is appended to the existing grouped terminal Apprise failure notification, not sent as a separate message. If Apprise is disabled, the result remains in the service logs. Radarr's behavior is live-validated; Sonarr still requires CI and host-specific live validation before deployment.
+The blocklist outcome is appended to the existing grouped terminal Apprise failure notification, not sent as a separate message. If Apprise is disabled, the result remains in the service logs. Both Radarr and Sonarr native blocklist paths are live-confirmed; GitHub Actions run #139 covers the v1.3.5 code and ambiguous-result recovery tests.
 
 ## Seerr Watchlist tracking (v1.3.0)
 
@@ -115,7 +115,7 @@ Use the HISTORY and SNAPSHOT log lines first.
 | FAILED | The candidate reached the add attempt but failed. Read the sanitized error and check API reachability, authorization and the TorrServer response. |
 | candidates=0 | No eligible new hashes were found under the current filtering rule. It is not in itself an error. |
 
-## Asynchronous add verification (strict FileStats criterion; installed v1.3.4)
+## Asynchronous add verification (strict FileStats criterion; installed v1.3.5)
 
 An `ADD_ACCEPTED` log entry means TorrServer acknowledged the request; it is not a completed import. `ADDED` is logged only when the exact hash exposes a non-empty usable `FileStats` list. Each item must have a positive unique file ID and a unique safe relative path. The status string (`Torrent added`, `Torrent getting info`, `Torrent working` or `Torrent in db`) and `action=list` membership alone are not sufficient.
 
@@ -135,7 +135,7 @@ To explicitly re-queue exhausted unverified attempts for one source instance, ru
 
 Do not combine --retry-failed with --dry-run. This option re-queues only failed unverified attempts for the selected instance; it does not clear successful import history or automatically restore confirmed user-removed torrents. Use --rebuild only for intentional historical repopulation.
 
-In v1.3.4, verification means usable `FileStats` are available for the exact hash. This establishes that the downstream importer can inspect a file structure; it does not itself guarantee successful playback, seeding or durable disk commit.
+In v1.3.5, verification means usable `FileStats` are available for the exact hash. This establishes that the downstream importer can inspect a file structure; it does not itself guarantee successful playback, seeding or durable disk commit.
 
 ## API and authentication errors
 

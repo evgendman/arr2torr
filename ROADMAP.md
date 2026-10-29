@@ -4,15 +4,14 @@ This document separates the installed torr-arr-importer revision, observed live 
 
 ## Confirmed installed revision and live validation (2026-10-29)
 
-- **Installed runtime:** `/opt/torr-arr-importer/importer.py --version` returned `1.3.4` on MINI-Ubuntu. Its SHA-256 is `cb10e78ab5f9e94d36af5cb77622ad86601a505bb1410f85bbe458d3dd82c3f4`, identical to the prepared source file from commit `78ba4801e5e1fc3cfdc4cb620e2e55853e61573c`. The in-place deployment replaced only `importer.py`; config files, the shared SQLite database and systemd unit files were preserved. A backup is retained under `/tmp/arr2torr-v1.3.3-backup.l78Rxu`.
-- **Explicit config follow-up:** the live `/etc/torr-arr-importer/radarr-1080.toml` was checked and does not currently contain `radarr_blocklist_enabled`. The enabled behavior currently relies on the backward-compatible code default `true`. All Radarr example TOMLs now state `radarr_blocklist_enabled = true` explicitly; the same line should be added to the live config so the policy is visible in configuration as well.
-- **GitHub publication state:** PR [#4](https://github.com/evgendman/arr2torr/pull/4) remains open and unmerged. No Git tag or published GitHub release is present. v1.3.4 remains the **confirmed installed source/runtime version**, but is not an official tagged release. The PR branch now contains a v1.3.5 code candidate for Sonarr blocklisting; this new code is not installed.
-- **Previous automated tests:** GitHub Actions [run #117](https://github.com/evgendman/arr2torr/actions/runs/40833440612) passed on Python 3.11 and 3.12 with 49 tests, compilation and version check (`1.3.4`). That run predates the Sonarr blocklist extension; the v1.3.5 candidate requires a fresh CI run.
-- **Strict success verification live-tested (2026-10-29):** after new Radarr media appeared, the 12:35:53 run found 21 candidates. Fourteen initially reached `ADDED verification=usable-file-stats`; `Everyone Says I Love You (1996)` subsequently succeeded on attempt 3. Five further alternative releases discovered after blocklisting also reached `ADDED verification=usable-file-stats`. In total, 20 observed successful additions were confirmed by usable `FileStats`, not just by a TorrServer acknowledgement or hash membership.
-- **Terminal blocklist path live-confirmed:** seven failed release choices reached the configured three-attempt limit and emitted `RADARR_BLOCKLIST_BLOCKED` after Radarr's native failed-history action. Three grouped critical notifications were acknowledged by Apprise (`APPRISE_SENT`, HTTP 200; batches of two, four and one item). The seven releases were *Leaves of Grass* (2009), *Keeping the Faith* (2000), *The French Dispatch* (2021), *Motherless Brooklyn* (2019), *Isle of Dogs* (2018), and two releases of *Sausage Party* (2016): BDRip 480p and HDRip 480p. This confirms the previously untested live blocklist path for this observed batch.
-- **Replacement search outcome:** five replacement releases for *Leaves of Grass*, *Keeping the Faith*, *The French Dispatch*, *Motherless Brooklyn* and *Isle of Dogs* were confirmed with usable `FileStats`. The *Sausage Party* HDRip 480p replacement failed verification at attempt 3 at 13:02:56 and was also blocklisted; the one-item critical Apprise notification returned HTTP 200. The following 13:05:54 run completed with `candidates=0`, so a working replacement for *Sausage Party* has not yet been observed.
-- **Systemd status caveat:** cycles that contain failed verification items log their `DONE` summary and exit code 1, leaving the oneshot service marked `failed` even though the timer remains active and schedules later cycles. This matches the current `return 0 if failed == 0 else 1` code path; consider a separate operations/exit-status improvement. Do not interpret the unit's failed state as proof that blocklist requests or the timer itself failed.
-- **Still open:** make `radarr_blocklist_enabled = true` explicit in the live Radarr config; add `sonarr_blocklist_enabled = true` explicitly to any active Sonarr profile intended to use the feature when the new code is deliberately deployed; validate the Sonarr blocklist path against the installed Sonarr version; reassess the 32 historical success rows created under v1.3.3 without resetting SQLite or resurrecting intentionally removed hashes; and confirm downstream torr2strm processing. `FileStats` alone does not prove successful playback or end-to-end library ingestion.
+- **Installed runtime/source identity:** `/opt/torr-arr-importer/importer.py --version` returned `1.3.5` on MINI-Ubuntu. The installed file's `git hash-object` is `712d6f4a276602250a25c52c5f5ccf6b0af92667`, identical to the Git blob SHA of the v1.3.5 source file `src/importer.py`.
+- **CI:** GitHub Actions [run #139](https://github.com/evgendman/arr2torr/actions/runs/40844001781) passed on Python 3.11 and 3.12 with 56 unit tests per version, compilation and version check (`1.3.5`).
+- **Explicit config follow-up:** the last read-only check of `/etc/torr-arr-importer/radarr-1080.toml` found that it omitted `radarr_blocklist_enabled`; that runtime relied on the backwards-compatible default `true`. Recheck the active file and make the setting explicit if not already done. Example TOMLs already state the flag explicitly.
+- **Strict success verification live-tested:** 20 new/replacement additions reached `ADDED verification=usable-file-stats`. The immediate TorrServer add acknowledgement and hash list membership were not treated as final success.
+- **Radarr terminal blocklist path confirmed:** seven failed release choices reached the configured three-attempt limit and emitted `RADARR_BLOCKLIST_BLOCKED` after Radarr's native failed-history action. Three grouped critical Apprise notifications were acknowledged with HTTP 200 (batches of two, four and one item). Five replacement releases subsequently passed `FileStats` verification.
+- **Sonarr terminal blocklist path confirmed:** five failed series-release choices logged `SONARR_BLOCKLIST_BLOCKED` on 2026-10-29. Replacement releases for Outer Banks S01, Outer Banks S03 and Dark S03 subsequently reached `ADDED verification=usable-file-stats`. The logs confirm successful native blocklist actions; no replacement additions for Love, Death & Robots S02/S03 were observed in the reviewed log window. Replacement search results depend on Sonarr's own settings and available releases; the absence of an observed alternative does not make the blocklist action unsuccessful.
+- **Systemd status caveat:** cycles with verification failures log their `DONE` summary and exit code 1, leaving the oneshot service marked `failed` even while its timer remains active and schedules later cycles. This matches the current `return 0 if failed == 0 else 1` code path; do not interpret the unit state alone as proof that the timer or blocklist request failed.
+- **Still open (not part of the blocklist milestone):** recheck the explicit live Radarr flag; reassess the 32 historical success rows created under v1.3.3 without resetting SQLite or resurrecting intentionally removed hashes; and confirm downstream `torr2strm` processing. `FileStats` alone does not prove successful playback or end-to-end library ingestion.
 ## Implemented
 
 - One standard-library Python implementation for both Radarr and Sonarr.
@@ -32,7 +31,7 @@ This document separates the installed torr-arr-importer revision, observed live 
 - Atomic pending claims across Arr instances, persistent retry state, bounded exponential backoff and explicit --retry-failed recovery.
 - Terminal-only grouped critical Apprise messages with persistent delivery retry state, independent of TorrServer retry state.
 - Optional Seerr Watchlist tracking for terminal transfer failures.
-- Independently configured Radarr and Sonarr native blocklist handling after the configured add/verification attempt limit is exhausted; only Radarr is live-validated so far.
+- Independently configured Radarr and Sonarr native blocklist handling after the configured add/verification attempt limit is exhausted. Both paths are live-confirmed on MINI-Ubuntu; see item 10 below.
 - Stale pending-row cleanup when the hash is already in successful import history, and re-arming after a strictly newer Grab for the same hash.
 
 ## Earlier validation records (historical)
@@ -206,7 +205,7 @@ Add tests for:
 
 ### 7. Confirm successful additions only after usable TorrServer FileStats are available
 
-**Status: deployed and live-validated on MINI-Ubuntu (2026-10-29); PR #4 is still open and no official tag exists.** Installed v1.3.4 requires usable `FileStats` rather than exact-hash membership alone. Its file SHA-256 is `cb10e78ab5f9e94d36af5cb77622ad86601a505bb1410f85bbe458d3dd82c3f4`; 49 tests pass in GitHub Actions [run #117](https://github.com/evgendman/arr2torr/actions/runs/40833440612). Live runs confirmed 20 additions with usable `FileStats`, six terminal failures reaching Radarr's native blocklist, and grouped critical Apprise delivery (HTTP 200). The 32-row v1.3.3 historical re-assessment and downstream torr2strm confirmation remain open.
+**Status: deployed and live-validated on MINI-Ubuntu on 2026-10-29.** Installed v1.3.5 requires usable `FileStats` rather than exact-hash membership alone. The installed importer file's Git blob SHA matches source (`712d6f4a276602250a25c52c5f5ccf6b0af92667`); 56 tests per Python version pass in GitHub Actions [run #139](https://github.com/evgendman/arr2torr/actions/runs/40844001781). Live runs confirmed 20 additions with usable `FileStats`, seven terminal failures reaching Radarr's native blocklist and five reaching Sonarr's native blocklist; grouped critical Apprise delivery returned HTTP 200. The 32-row v1.3.3 historical re-assessment and downstream torr2strm confirmation remain open.
 
 **Required success contract**
 
@@ -224,7 +223,7 @@ When a hash is listed without usable `FileStats`, keep checking its details with
 - [x] Live-validate on MINI-Ubuntu that newly added releases are recorded as successful only after usable `FileStats`; 20 successful additions were observed in the 2026-10-29 logs.
 - [ ] Confirm at least one of those verified releases completed downstream processing by `torr2strm`; `FileStats` alone does not prove end-to-end library ingestion.
 - [ ] Reassess the 2026-10-29 batch of 32 v1.3.3 historical rows against usable `FileStats`; the earlier 32/32 list-presence result is not sufficient evidence of downstream readiness.
-- [x] Live-validate terminal failure after three attempts, Radarr's native blocklist action, and the grouped critical Apprise outcome. Six release choices were blocklisted and the grouped critical deliveries received HTTP 200.
+- [x] Live-validate terminal failure after three attempts, Radarr's native blocklist action, and the grouped critical Apprise outcome. Seven release choices were blocklisted and the grouped critical deliveries received HTTP 200.
 
 ### 8. Coordinate with the downstream STRM/NFO project
 
@@ -281,7 +280,7 @@ The importer already preserves provider IDs and selected Arr fields in TorrServe
 
 ### 10. Automatically blocklist terminally failed Radarr/Sonarr releases
 
-**Status:** Radarr is implemented and live-validated in installed v1.3.4 on MINI-Ubuntu (2026-10-29): seven terminal release choices went through Radarr's native failed-history path and three grouped critical Apprise notifications were acknowledged with HTTP 200. Sonarr support is implemented in the v1.3.5 PR candidate only; it is not installed and is awaiting CI plus live validation against the deployed Sonarr version. PR #4 remains open; neither candidate is a published tagged release.
+**Status: completed — both Radarr and Sonarr native blocklist paths are live-confirmed in v1.3.5 on MINI-Ubuntu (2026-10-29).** Seven terminal film-release choices reached Radarr's native failed-history path and logged `RADARR_BLOCKLIST_BLOCKED`; five terminal series-release choices logged `SONARR_BLOCKLIST_BLOCKED`. For Radarr, five replacement releases were verified with usable `FileStats`; for Sonarr, replacement additions for Outer Banks S01, Outer Banks S03 and Dark S03 were verified. No replacement additions for Love, Death & Robots S02/S03 were observed in the reviewed log window; replacement search depends on Sonarr's own settings and available releases. This does not negate the successful blocklist actions. GitHub Actions run #139 passed on Python 3.11/3.12 with 56 tests per version plus compilation and version check; no v1.3.5 tag or GitHub Release has been published yet.
 
 **Goal**
 
@@ -319,8 +318,8 @@ Reduce manual intervention by excluding a release from future Arr selection afte
 - [x] Add separate log outcomes and append blocklist status to the existing terminal Apprise message.
 - [x] Add Sonarr regression coverage for config defaults/disablement, native endpoint, paginated records, ambiguous-result recovery and notification wording.
 - [x] Preserve the existing live-validated Radarr flow and its test coverage.
-- [ ] Run CI for the v1.3.5 candidate on supported Python versions.
-- [ ] Live-validate Sonarr's terminal-failure path, ambiguous response recovery and any configured replacement-search behavior on MINI-Ubuntu before deployment.
+- [x] Run CI for v1.3.5 on supported Python versions (GitHub Actions run #139: 56 tests each on Python 3.11 and 3.12, plus compilation and version check).
+- [x] Live-validate Sonarr's terminal-failure path on MINI-Ubuntu. Five failed series-release choices logged `SONARR_BLOCKLIST_BLOCKED`; replacement additions for Outer Banks S01, Outer Banks S03 and Dark S03 passed usable-`FileStats` verification. Unit tests cover ambiguous-response recovery. No alternative additions for Love, Death & Robots S02/S03 were observed in the reviewed log window; replacement availability remains dependent on Sonarr's settings and available releases.
 
 
 ## Explicitly not planned

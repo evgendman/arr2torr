@@ -4,7 +4,7 @@
 
 arr2torr is the project and documentation home for **torr-arr-importer**, a polling service that transfers releases selected with **Grab** in Radarr or Sonarr directly to the TorrServer API. It is intended for a media workflow where the user wants to start streaming from TorrServer, then expose those streams to a media library through STRM files or another integration.
 
-The installed runtime on MINI-Ubuntu remains **torr-arr-importer v1.3.4**. PR #4 is being extended with a **v1.3.5 candidate** that adds Sonarr terminal-failure blocklisting; that candidate is not installed and is not an official tagged release.
+**torr-arr-importer v1.3.5 is deployed and live-validated on MINI-Ubuntu (2026-10-29).** GitHub Actions [run #139](https://github.com/evgendman/arr2torr/actions/runs/40844001781) passed on Python 3.11 and 3.12 with 56 tests per version, compilation and version check. Both Radarr and Sonarr terminal-failure blocklisting have now been exercised in live logs; see [Roadmap](ROADMAP.md) for observed results and remaining unrelated checks.
 
 ## Why this exists
 
@@ -72,7 +72,7 @@ With the usual five-minute timer, a successfully grabbed release is normally tra
 
 TorrServer may acknowledge an add request before its background metadata acquisition completes. An expected hash in the initial response is therefore not treated as final success.
 
-The importer persists a pending attempt before the add request, submits eligible releases first, then polls TorrServer at a configurable interval. Every pending hash has its own deadline. In v1.3.4, the exact hash must expose a non-empty, usable `FileStats` list before it is recorded as a successful import. Entries need positive unique file IDs and unique safe relative paths. If a hash is present but incomplete, the importer inspects the live object with `action=get` rather than blindly sending another add; a DB-only `Torrent in db` record gets a bounded metadata-activation request before polling continues. The immediate response and list membership are not final success.
+The importer persists a pending attempt before the add request, submits eligible releases first, then polls TorrServer at a configurable interval. Every pending hash has its own deadline. In v1.3.5, the exact hash must expose a non-empty, usable `FileStats` list before it is recorded as a successful import. Entries need positive unique file IDs and unique safe relative paths. If a hash is present but incomplete, the importer inspects the live object with `action=get` rather than blindly sending another add; a DB-only `Torrent in db` record gets a bounded metadata-activation request before polling continues. The immediate response and list membership are not final success.
 
 Pending attempts live in the shared SQLite table pending_adds and do not contain the credential-bearing download URL. After a process restart, they are reconciled against TorrServer before retrying. Failures use bounded exponential backoff and stop automatically after the configured attempt limit; --retry-failed explicitly re-queues exhausted, never-confirmed attempts for the selected Arr instance.
 
@@ -80,7 +80,7 @@ Verification means TorrServer exposes usable `FileStats` for the exact hash. Mer
 
 Default verification settings are verification_timeout_sec = 120, verification_poll_interval_sec = 3.0, retry_backoff_sec = 60 (doubling per failed attempt, capped at one hour), and max_add_attempts = 3. Compare the timeout with the TorrentDisconnectTimeout setting of the installed TorrServer build.
 
-## Final-failure Apprise notifications (introduced in v1.3.2; retained in v1.3.4 candidate)
+## Final-failure Apprise notifications (introduced in v1.3.2; retained in v1.3.5)
 
 Notifications are opt-in and use the shared Apprise API; arr2torr never stores Telegram tokens, chat IDs or topic IDs. **There are no Telegram messages while an item is still waiting for an automatic add/verification retry.** The importer waits until the failure is terminal (all configured add attempts are exhausted, or a permanent error makes retry impossible).
 
@@ -88,7 +88,7 @@ The final message goes to the critical tag and brings the entire action-oriented
 
 Terminal notification state is stored in the existing SQLite database and is migrated in place. An unsuccessful Apprise request leaves the message pending and schedules another attempt with increasing delays (1, 5, 15, 30 and then 60 minutes, capped at one hour). A successful 2xx response marks the notification delivered. This is at-least-once delivery: if Apprise accepts a request but its response is lost, a retry can result in a duplicate. Delivery failures never change the TorrServer import result. Notifications remain disabled in example configs by default. See [Installation and configuration](docs/INSTALLATION.md) and [Operations](docs/OPERATIONS.md).
 
-## Automatic Radarr/Sonarr blocklisting after terminal transfer failure (v1.3.5 candidate)
+## Automatic Radarr/Sonarr blocklisting after terminal transfer failure (v1.3.5)
 
 Every Radarr example TOML explicitly sets `radarr_blocklist_enabled = true`, and every Sonarr example TOML explicitly sets `sonarr_blocklist_enabled = true`. Keep the matching flag explicit in each active config so the policy is visible without inspecting importer code. Both flags default to `true` for backward compatibility with existing configs; set a flag to `false` only to deliberately disable blocklisting for that instance.
 
@@ -100,7 +100,8 @@ Once a release reaches terminal TorrServer add/verification failure after all co
 - State is saved in separate Radarr/Sonarr SQLite columns and migrated in place. Existing terminal failures are marked as pre-upgrade during the corresponding migration and are not sent to the Arr application retroactively.
 - Outcomes are appended to the existing grouped terminal Apprise message and recorded in logs (`RADARR_BLOCKLIST_*` or `SONARR_BLOCKLIST_*`). There is no separate blocklist-only notification.
 - If a failed-history request has an ambiguous HTTP/network result, the importer does not repeat the non-idempotent POST blindly. It checks the matching Arr blocklist on later runs and compares the release source title. Neither public blocklist resource exposes enough information to prove an exact infohash match in this recovery path.
-- The Radarr path was live-validated on MINI-Ubuntu on 2026-10-29. The v1.3.5 Sonarr extension is code/test candidate only and still requires CI and live validation against the deployed Sonarr version before installation.
+- **Radarr:** seven terminally failed release choices reached `RADARR_BLOCKLIST_BLOCKED`; three grouped critical Apprise notifications were acknowledged with HTTP 200, and five replacement releases were verified.
+- **Sonarr:** five terminally failed series-release choices reached `SONARR_BLOCKLIST_BLOCKED`; replacement releases for Outer Banks S01, Outer Banks S03 and Dark S03 then reached `ADDED verification=usable-file-stats`. No alternative addition for Love, Death & Robots S02/S03 was observed in the reviewed log window. This does not negate the confirmed blocklist actions: replacement search and available results depend on Sonarr's own configuration and the releases available to it.
 
 
 ## Seerr Watchlist for terminal transfer failures (v1.3.0)
@@ -203,7 +204,7 @@ The current stored data subset includes source instance name, media type, target
 - [Roadmap and validation status](ROADMAP.md)
 - [Version history](CHANGELOG.md)
 
-The installed and verified runtime is **torr-arr-importer v1.3.4**. It uses Python 3.11+ and the standard library; it does not require external Python packages. GitHub PR #4 remains open, so the installed version is not yet an official tagged release.
+The installed and verified runtime is **torr-arr-importer v1.3.5**. It uses Python 3.11+ and the standard library; it does not require external Python packages. The live Radarr and Sonarr terminal-failure blocklist paths are confirmed; GitHub PR #4 remains open and no v1.3.5 tag or GitHub Release has been published yet.
 
 ## Related project: STRM/NFO library generation
 
@@ -211,10 +212,8 @@ The installed and verified runtime is **torr-arr-importer v1.3.4**. It uses Pyth
 
 ## Current status
 
-MINI-Ubuntu is running `torr-arr-importer 1.3.4`. The installed file SHA-256 is `cb10e78ab5f9e94d36af5cb77622ad86601a505bb1410f85bbe458d3dd82c3f4`, matching the tested source pin `78ba4801e5e1fc3cfdc4cb620e2e55853e61573c`. The code-only upgrade preserved configuration, SQLite history and systemd unit files. GitHub Actions [run #117](https://github.com/evgendman/arr2torr/actions/runs/40833440612) passed on Python 3.11 and 3.12 with 49 tests. PR #4 is still open/unmerged and there is no official v1.3.4 tag/release, so the installed version is verified but not yet formally published.
+MINI-Ubuntu is running **torr-arr-importer v1.3.5**. The installed `importer.py` file's Git blob SHA (`712d6f4a276602250a25c52c5f5ccf6b0af92667`) matches the corresponding source file on the feature branch byte-for-byte. GitHub Actions [run #139](https://github.com/evgendman/arr2torr/actions/runs/40844001781) passed on Python 3.11 and 3.12 with 56 tests per version, compilation and version check.
 
-The historical 10-hour window ending 2026-10-29 09:45 (+05:00) was collected under v1.3.3's weaker list-membership criterion: 115 runs and 79 add requests were followed by exact hash membership, but this did not prove usable file metadata. That finding prompted the v1.3.4 stricter criterion.
+Live logs on 2026-10-29 confirmed 20 fresh/replacement additions reaching `ADDED verification=usable-file-stats`. For Radarr, seven terminally failed release choices reached the native failed-history action and logged `RADARR_BLOCKLIST_BLOCKED`; three grouped critical Apprise notifications were acknowledged with HTTP 200, and five replacements were verified. For Sonarr, five failed release choices logged `SONARR_BLOCKLIST_BLOCKED`; replacement additions for Outer Banks S01, Outer Banks S03 and Dark S03 were verified. No alternative additions for Love, Death & Robots S02/S03 were observed in the reviewed log window, but the native blocklist actions themselves are confirmed. The blocklist implementation/validation milestone is complete for both applications; replacement availability remains dependent on each app's own settings and available releases.
 
-Live results on 2026-10-29: 20 fresh/replacement additions reached `ADDED verification=usable-file-stats`. Seven release choices that remained unverified through the configured attempt limit were processed by Radarr's native failed-history path; logs confirmed `RADARR_BLOCKLIST_BLOCKED` for each. Three grouped critical Apprise notifications were acknowledged with HTTP 200 (groups of two, four and one item). Five alternative releases were confirmed ready for the first five affected films. The `Sausage Party` HDRip 480p alternative also exhausted three attempts and was blocklisted; no working replacement for that film had appeared by the 13:05:54 run.
-
-Remaining work is to add `radarr_blocklist_enabled = true` explicitly to the active Radarr config, confirm a `FileStats`-verified release all the way through downstream `torr2strm`, and cautiously reassess the 32 old v1.3.3 success rows without resetting SQLite/resurrecting deliberately removed hashes. Some importer oneshot units report exit code 1 whenever verification failures occur in a cycle, while their timer remains active and continues scheduled retries; the operational meaning of that service status is documented in the roadmap. See [Roadmap and validation status](ROADMAP.md).
+Remaining unrelated checks are to confirm one `FileStats`-verified release through downstream `torr2strm`, reassess 32 historical success rows created under v1.3.3 without resetting SQLite or resurrecting intentionally removed hashes, and recheck that the active Radarr config explicitly states `radarr_blocklist_enabled = true`. GitHub PR #4 remains open; no v1.3.5 tag or GitHub Release has been published yet.

@@ -1,8 +1,8 @@
 # Installation and configuration
 
-This guide covers initial setup and the controlled in-place update procedure for the v1.3.4 FileStats-verification revision. The update was performed on MINI-Ubuntu on 2026-10-29. Adapt the four-instance examples to the actual addresses, ports and API keys in your installation.
+This guide covers initial setup, configuration and operational safeguards. The in-place upgrade procedure below is a historical record of the v1.3.4 FileStats-verification update performed on MINI-Ubuntu on 2026-10-29; it is not a v1.3.5 upgrade recipe and should not be rerun on that host. Adapt the four-instance examples to the actual addresses, ports and API keys in your installation.
 
-> **Confirmed deployment status (2026-10-29):** `/opt/torr-arr-importer/importer.py --version` returns `1.3.4`. Its SHA-256 is `cb10e78ab5f9e94d36af5cb77622ad86601a505bb1410f85bbe458d3dd82c3f4`, matching source commit `78ba4801e5e1fc3cfdc4cb620e2e55853e61573c`. The update replaced only `importer.py`; TOML files, SQLite state and systemd units were preserved and a backup was saved under `/tmp/arr2torr-v1.3.3-backup.l78Rxu`. The strict `FileStats` criterion and Radarr terminal blocklist path have been live-validated; see the [Roadmap](../ROADMAP.md) and [Operations](OPERATIONS.md). PR #4 remains open and no official v1.3.4 Git tag/release has been published.
+> **Current deployment status (2026-10-29):** `/opt/torr-arr-importer/importer.py --version` returns `1.3.5`. The installed file's `git hash-object` matches the v1.3.5 source file's Git blob SHA (`712d6f4a276602250a25c52c5f5ccf6b0af92667`). GitHub Actions [run #139](https://github.com/evgendman/arr2torr/actions/runs/40844001781) passed on Python 3.11 and 3.12 with 56 tests per version, compilation and version check. Both Radarr's and Sonarr's terminal-failure blocklist paths have live log confirmation; see the [Roadmap](../ROADMAP.md) and [Operations](OPERATIONS.md). No GitHub Release or v1.3.5 tag has been published yet.
 >
 > **Config follow-up:** the current `/etc/torr-arr-importer/radarr-1080.toml` was checked and omits `radarr_blocklist_enabled`, so the current runtime relies on the backward-compatible code default `true`. Keep this setting explicit in active Radarr configs; the command in the blocklisting section shows the required line.
 
@@ -176,7 +176,7 @@ For the current MINI-Ubuntu Radarr 1080p profile, the Radarr flag was absent whe
 
     sudoedit /etc/torr-arr-importer/radarr-1080.toml
 
-Keep `radarr_blocklist_enabled = true` if automatic Radarr blocklisting is intended. Apply `sonarr_blocklist_enabled = true` explicitly to each active Sonarr profile only when its automatic blocklist behavior is intended. The Sonarr extension in the v1.3.5 branch is not yet installed or live-validated; do not assume the flag has an effect in the currently installed v1.3.4 runtime. No systemd reload is needed for TOML changes; the importer reads its config at the beginning of each timer-triggered run.
+Keep `radarr_blocklist_enabled = true` if automatic Radarr blocklisting is intended. Apply `sonarr_blocklist_enabled = true` explicitly to each active Sonarr profile only when its automatic blocklist behavior is intended. The v1.3.5 runtime has logged successful native blocklist actions for five failed Sonarr release choices; the [Roadmap](../ROADMAP.md) records the live validation. No systemd reload is needed for TOML changes; the importer reads its config at the beginning of each timer-triggered run.
 
 Radarr and Sonarr blocklist states are stored in separate columns in the shared SQLite database and migrated in place. On first migration for each feature, existing terminal failures are marked `legacy_skipped`, avoiding a retrospective batch of failed-history actions. New terminal failures are processed automatically. `--retry-failed` resets the corresponding state when a failed TorrServer attempt is deliberately re-armed.
 

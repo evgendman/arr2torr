@@ -1,15 +1,19 @@
 # Changelog
 
-## torr-arr-importer v1.3.5 candidate (Sonarr terminal-failure blocklisting; not installed or tagged)
+## torr-arr-importer v1.3.5 — deployed and live-validated (2026-10-29)
 
 - Add explicit `sonarr_blocklist_enabled = true` to both Sonarr example TOMLs and parse the setting independently of Radarr's existing flag.
 - After a Sonarr release reaches terminal TorrServer add/verification failure and exhausts `max_add_attempts`, use Sonarr's native `POST /api/v3/history/failed/{historyId}` route. Preserve bounded TorrServer retries and exclude pre-add preparation errors.
 - Persist Sonarr blocklist state in dedicated SQLite columns, migrated in place; mark pre-upgrade failed Sonarr rows as `legacy_skipped`, and avoid resending a non-idempotent failed-history request after ambiguous outcomes.
 - Verify an ambiguous Sonarr action using `GET /api/v3/blocklist?seriesIds=...` and source-title matching; the public API does not prove an exact infohash match.
 - Add regression tests for enabled/disabled config, native endpoint use, separate state, paged blocklist parsing, ambiguous-response recovery and terminal notification wording.
-- **Validation state:** not installed on MINI-Ubuntu. CI and live validation against the currently deployed Sonarr version remain outstanding. Radarr's previously live-validated path is unchanged.
+- **CI:** GitHub Actions [run #139](https://github.com/evgendman/arr2torr/actions/runs/40844001781) passed on Python 3.11 and 3.12 with 56 unit tests per version, compilation and version check (`1.3.5`).
+- **Runtime identity:** `/opt/torr-arr-importer/importer.py --version` returned `1.3.5` on MINI-Ubuntu. The installed file matches the source file's Git blob SHA (`712d6f4a276602250a25c52c5f5ccf6b0af92667`).
+- **Radarr live validation:** seven terminally failed release choices reached the native failed-history action and logged `RADARR_BLOCKLIST_BLOCKED`; three grouped critical Apprise notifications were acknowledged with HTTP 200. Five alternative releases passed `FileStats` verification.
+- **Sonarr live validation:** five terminally failed series-release choices logged `SONARR_BLOCKLIST_BLOCKED`. Replacement additions for Outer Banks S01, Outer Banks S03 and Dark S03 then passed `FileStats` verification. No replacement additions for Love, Death & Robots S02/S03 were observed in the reviewed log window; that is a replacement-search/result observation, not a failure of the blocklist action.
+- **Publication status:** runtime and blocklist behavior are validated; PR #4 remains open, and no v1.3.5 Git tag or GitHub Release has been published.
 
-## torr-arr-importer v1.3.4 (installed on MINI-Ubuntu; PR #4 not yet merged/tagged)
+## torr-arr-importer v1.3.4 — strict FileStats verification base (superseded by v1.3.5)
 
 - Configuration convention: explicitly set `radarr_blocklist_enabled = true` in each active Radarr TOML. The code fallback to `true` when the key is absent remains only for backward compatibility; the setting is visible in both Radarr example configs. Sonarr configs do not use this Radarr-only setting.
 
@@ -22,7 +26,7 @@
 - **Live verification on MINI-Ubuntu (2026-10-29):** the installed program reports `1.3.4`; SHA-256 `cb10e78ab5f9e94d36af5cb77622ad86601a505bb1410f85bbe458d3dd82c3f4` matches source commit `78ba4801e5e1fc3cfdc4cb620e2e55853e61573c`. Twenty new/replacement additions were observed reaching `ADDED verification=usable-file-stats`.
 - Seven terminally failed release choices reached Radarr's native failed-history action and logged `RADARR_BLOCKLIST_BLOCKED`: *Leaves of Grass*, *Keeping the Faith*, *The French Dispatch*, *Motherless Brooklyn*, *Isle of Dogs*, and two *Sausage Party* releases. Three grouped critical Apprise sends were acknowledged with HTTP 200, for batches of two, four and one item. Five alternate releases subsequently passed `FileStats` verification; the *Sausage Party* HDRip 480p alternative also exhausted three attempts and was blocklisted, but no working replacement had appeared by the 13:05:54 run.
 - The existing SQLite history was retained. The 32 historical rows accepted by v1.3.3's weaker list-only criterion have not been automatically reclassified.
-- **Publication state:** PR #4 remains open and unmerged; no v1.3.4 Git tag or GitHub release is published. The installed runtime/source version is confirmed as v1.3.4, but it is not yet an official tagged release.
+- Superseded by v1.3.5 on 2026-10-29; current runtime identity and live validation are recorded in the top changelog entry.
 
 ## torr-arr-importer v1.3.3 (installed from PR #4 branch for controlled live validation; PR remains open)
 
