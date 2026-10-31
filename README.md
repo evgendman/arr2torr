@@ -4,7 +4,7 @@
 
 arr2torr is the project and documentation home for **torr-arr-importer**, a polling service that transfers releases selected with **Grab** in Radarr or Sonarr directly to the TorrServer API. It is intended for a media workflow where the user wants to start streaming from TorrServer, then expose those streams to a media library through STRM files or another integration.
 
-**Installed on MINI-Ubuntu: torr-arr-importer v1.3.5 (live-validated 2026-10-29).** A separate **v1.4.1 candidate** is available in draft [PR #6](https://github.com/evgendman/arr2torr/pull/6) on `feature/in-run-get-verification-v1.4.1`; it is not deployed. CI run [#154](https://github.com/evgendman/arr2torr/actions/runs/41209108991) passed on Python 3.11/3.12 with 61 tests each. Comparative measurements and separate live-host validation remain. See [Roadmap](ROADMAP.md) for status.
+**Last live-validated importer behavior on MINI-Ubuntu: v1.3.5 (2026-10-29).** On 2026-10-31, v1.4.0 candidate code was placed at `/opt/torr-arr-importer/importer.py`, but both importer timers were left stopped and the candidate was not run against the production SQLite database. v1.4.1 is available for review in draft [PR #6](https://github.com/evgendman/arr2torr/pull/6). CI run [#156](https://github.com/evgendman/arr2torr/actions/runs/41210258165) passed on Python 3.11/3.12/3.14 with 61 tests each; comparative measurements and separately authorized live-host validation remain.
 
 ## Why this exists
 
@@ -81,7 +81,7 @@ A present but incomplete object is never blindly re-added. In TorrServer MatriX.
 
 Only actual `action=add` submissions consume `max_add_attempts`. Hash reservations, get calls, present-but-incomplete objects and verification timeouts do not. Automatic HTTP retries are disabled for the side-effecting `add` request.
 
-Only usable, non-empty `FileStats` for the exact hash can create a successful-import record. Entries must have positive unique file IDs and unique safe relative paths. Confirmed hashes are not queried again during ordinary runs, preserving the safeguard against resurrecting torrents deliberately removed by the user. `--rebuild` remains the explicit operator-controlled exception. The v1.4.1 candidate is not deployed; CI is green, while comparative measurements and separately authorized live validation remain. MINI-Ubuntu remains on v1.3.5.
+Only usable, non-empty `FileStats` for the exact hash can create a successful-import record. Entries must have positive unique file IDs and unique safe relative paths. Confirmed hashes are not queried again during ordinary runs, preserving the safeguard against resurrecting torrents deliberately removed by the user. `--rebuild` remains the explicit operator-controlled exception. The v1.4.1 candidate is not deployed; CI is green, while comparative measurements and separately authorized live validation remain. MINI-Ubuntu has v1.4.0 candidate code on disk, but its importer timers are stopped and its production SQLite has not been touched by that code.
 
 ## Final-failure Apprise notifications (introduced in v1.3.2; retained in v1.3.5)
 
@@ -207,7 +207,7 @@ The current stored data subset includes source instance name, media type, target
 - [Roadmap and validation status](ROADMAP.md)
 - [Version history](CHANGELOG.md)
 
-The installed and live-validated runtime remains **torr-arr-importer v1.3.5**. The v1.4.1 candidate is in draft [PR #6](https://github.com/evgendman/arr2torr/pull/6) on `feature/in-run-get-verification-v1.4.1`. GitHub Actions run [#154](https://github.com/evgendman/arr2torr/actions/runs/41209108991) passed on Python 3.11/3.12 (61 tests each); comparative measurements and separately authorized MINI-Ubuntu validation remain before deployment. The service uses Python 3.11+ and the standard library; it does not require external Python packages.
+The last live-validated behavior is **torr-arr-importer v1.3.5**. The `/opt/torr-arr-importer/importer.py` path on MINI-Ubuntu currently contains v1.4.0 candidate code, but both timers are stopped and that code has not been run against production SQLite. The v1.4.1 candidate is in draft [PR #6](https://github.com/evgendman/arr2torr/pull/6). GitHub Actions run [#156](https://github.com/evgendman/arr2torr/actions/runs/41210258165) passed on Python 3.11/3.12/3.14 (61 tests each); comparative measurements and separately authorized live-host validation remain. The service uses Python 3.11+ and the standard library.
 
 ## Related project: STRM/NFO library generation
 
@@ -215,7 +215,7 @@ The installed and live-validated runtime remains **torr-arr-importer v1.3.5**. T
 
 ## Current status
 
-MINI-Ubuntu is still running **torr-arr-importer v1.3.5**. The v1.4.1 candidate is available for review in [draft PR #6](https://github.com/evgendman/arr2torr/pull/6); it has not been installed or live-tested on the host. CI is green, while comparative request/CPU measurements and separate live-host validation remain. The v1.3.5 source identity and live validation are documented in the historical validation section of [Roadmap](ROADMAP.md).
+The last live-validated behavior on MINI-Ubuntu is **torr-arr-importer v1.3.5**. v1.4.0 candidate code is now on disk in `/opt/torr-arr-importer/importer.py`, but both timers remain stopped and it has not run against production SQLite. v1.4.1 is available for review in [draft PR #6](https://github.com/evgendman/arr2torr/pull/6). CI is green across Python 3.11, 3.12 and 3.14; comparative request/CPU measurements and separate live-host validation remain. See [Roadmap](ROADMAP.md) for the recorded source identity and validation history.
 
 Live logs on 2026-10-29 confirmed 20 fresh/replacement additions reaching `ADDED verification=usable-file-stats`. For Radarr, seven terminally failed release choices reached the native failed-history action and logged `RADARR_BLOCKLIST_BLOCKED`; three grouped critical Apprise notifications were acknowledged with HTTP 200, and five replacements were verified. For Sonarr, five failed release choices logged `SONARR_BLOCKLIST_BLOCKED`; replacement additions for Outer Banks S01, Outer Banks S03 and Dark S03 were verified. No alternative additions for Love, Death & Robots S02/S03 were observed in the reviewed log window, but the native blocklist actions themselves are confirmed. The blocklist implementation/validation milestone is complete for both applications; replacement availability remains dependent on each app's own settings and available releases.
 

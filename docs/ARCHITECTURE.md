@@ -1,6 +1,6 @@
 # Architecture and state model
 
-This document describes the **v1.4.1 candidate** on branch `feature/in-run-get-verification-v1.4.1`. GitHub Actions run [#154](https://github.com/evgendman/arr2torr/actions/runs/41209108991) passed on Python 3.11 and 3.12 with 61 tests per version, compilation and version check. The candidate is not deployed; MINI-Ubuntu remains on the live-validated v1.3.5 runtime. Comparative CPU/request measurements and live-host validation remain.
+This document describes the **v1.4.1 candidate** on branch `feature/in-run-get-verification-v1.4.1`. GitHub Actions run [#156](https://github.com/evgendman/arr2torr/actions/runs/41210258165) passed on Python 3.11, 3.12 and 3.14 with 61 tests per version, compilation and version check. The candidate is not deployed. MINI-Ubuntu currently has v1.4.0 candidate code on disk but both importer timers are stopped; that code has not been run against production SQLite. The last live-validated behavior was v1.3.5. Comparative CPU/request measurements and live-host validation remain.
 
 ## 1. Source of truth
 
