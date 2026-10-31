@@ -1,6 +1,6 @@
 # Architecture and state model
 
-This document describes the **v1.4.0 candidate**. MINI-Ubuntu remains on the live-validated v1.3.5 runtime; v1.4.0 is developed separately and is not deployed. The candidate replaces full TorrServer inventory snapshots with hash-addressed observations and removes the in-process metadata polling wait. Its CI and live-host validation are still required.
+This document describes the **v1.4.0 candidate**. GitHub Actions run #149 passed on Python 3.11/3.12 with 59 tests each, compilation and version check. MINI-Ubuntu remains on the live-validated v1.3.5 runtime; v1.4.0 is not deployed. Comparative CPU/request measurements and live-host validation remain.
 
 ## 1. Source of truth
 
