@@ -655,7 +655,6 @@ class BatchVerificationTests(unittest.TestCase):
     def test_queue_deadlines_are_individual_and_do_not_extend_each_other(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = make_config(Path(tmp))
-            cfg.verification_timeout_sec = 10
             grabs = [
                 make_grab(HASH1, 1, "First Movie"),
                 make_grab(HASH2, 2, "Second Movie"),
