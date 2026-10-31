@@ -4,7 +4,7 @@ This document separates the installed torr-arr-importer revision, observed live 
 
 ## v1.4.1 candidate — shared in-run FileStats verification queue
 
-**Status: implementation committed on branch `feature/in-run-get-verification-v1.4.1`; GitHub Actions run [#156](https://github.com/evgendman/arr2torr/actions/runs/41210258165) passed on Python 3.11, 3.12 and 3.14 with 61 tests per version, compilation and version check.** Comparative request/CPU measurements and separately authorized live-host validation remain. On MINI-Ubuntu, `/opt/torr-arr-importer/importer.py` currently contains v1.4.0 candidate code, but both importer timers are stopped; it has not been run against the production SQLite database. The last live-validated behavior was v1.3.5. v1.4.1 is not deployed or released.
+**Status: implementation committed on branch `feature/in-run-get-verification-v1.4.1`; GitHub Actions run [#157](https://github.com/evgendman/arr2torr/actions/runs/41210488097) passed on Python 3.11, 3.12 and 3.14 with 61 tests per version, compilation and version check.** On MINI-Ubuntu (2026-10-31), an isolated read-only smoke test of the v1.4.1 candidate passed against the real TorrServer API using a temporary Arr mock, temporary SQLite database and an `action=get`-only proxy. A preliminary single-request size/latency sample was also recorded; representative CPU/request-count comparison across idle, pending, small-batch and large-library cases remains incomplete. Production `/opt/torr-arr-importer/importer.py` still contains v1.4.0 candidate code; both importer timers are inactive (enabled), and v1.4.1 has not been run against production SQLite. The last production importer behavior live-validated with real Arr workflows remains v1.3.5. v1.4.1 is not deployed or released.
 
 - Keeps hash-addressed `action=get` and removes full TorrServer inventory polling from ordinary and rebuild processing.
 - Performs the initial exact-hash check and submits eligible adds for all candidates before entering one shared verification carousel.
@@ -15,7 +15,24 @@ This document separates the installed torr-arr-importer revision, observed live 
 - Preserves the two-distinct-run 404 safeguard after an accepted add. Repeated 404 responses inside one carousel are counted at most once in that importer execution.
 - Keeps the shared SQLite state, atomic cross-instance claims, deliberate-removal protection, retry/backoff, Radarr/Sonarr blocklisting, Seerr Watchlist and notification paths.
 
-**Validation remaining:** comparative request/CPU checks and separately authorized live-host validation on MINI-Ubuntu. CI is green in [run #156](https://github.com/evgendman/arr2torr/actions/runs/41210258165) across Python 3.11, 3.12 and 3.14. Do not enable the importer timers merely because CI passed.
+**Validation remaining:** representative request-count and CPU measurements across idle, pending, small-batch and larger-library cases; no A/B run of the v1.3.5 binary was possible because its only local backup is root-private and no public v1.3.5 tag exists. CI is green in [run #157](https://github.com/evgendman/arr2torr/actions/runs/41210488097) across Python 3.11, 3.12 and 3.14. The isolated API smoke test described below is not production importer deployment validation. Do not enable the importer timers merely because CI and the isolated smoke test passed.
+
+
+## MINI-Ubuntu isolated smoke test and preliminary API sample (2026-10-31)
+
+**Result: candidate behavior passed in an isolated, read-only test; production deployment was not performed.**
+
+- The exact v1.4.1 source at commit `8dd95a08cc86d7701dfe2a391f8c2e5142fa37be` was downloaded to `/tmp`. Its Git blob SHA matched `c9943d92a396882765a92e01cb40d28aa7388777`; Python 3.14.4 `py_compile` succeeded and `--version` returned `1.4.1`.
+- A temporary Arr mock returned one Radarr Grabbed record for Groundhog Day (1993), infohash `933b69e6356324d46f23d5dabadb238317c6d1cc`. The importer used only a temporary TOML config, temporary lock file and temporary SQLite database.
+- A local safety proxy forwarded only exact `POST /torrents {"action":"get","hash":"933b69e6356324d46f23d5dabadb238317c6d1cc"}` requests. It would reject all other paths, methods and payloads, including `action=add` and `action=list`.
+- First GET returned HTTP 200 with `Torrent in db` and no `FileStats`; the next GET about three seconds later returned HTTP 200 with `Torrent working` and one `FileStats` entry. The importer logged `ADDED ... verification=usable-file-stats recovery=action-get-in-run`, finished in 3.21 seconds, and promoted the hash into the **temporary** `imports` table. Test DB summary: imports=1, pending=0, terminal_events=0, attempts=0.
+- The proxy recorded zero blocked calls; no `add` or `list` request was forwarded to TorrServer. This directly validates the DB-only to ready transition through the candidate's in-run exact-hash GET carousel.
+- A separate one-request read-only sample against the same TorrServer measured: exact-hash GET = 1,494 response bytes / 0.197 s; full `action=list` = 531,442 response bytes / 0.219 s. The list response was about 356 times larger in this sample, while single-request latency was similar. This is a preliminary response-size comparison, not a representative repeated-load or CPU benchmark.
+- TorrServer RSS increased by about 131 MiB across the combined GET+LIST observation window. Since the GET also activated a DB-only torrent and no isolated before/after RSS sample was taken for each request, this change is **not attributed to either request individually**.
+- A 39-character hash in the first draft of the test fixture caused HTTP 500; after correcting the fixture to the exact 40-character hash found in TorrServer's local BoltDB, the smoke test passed. This was a test-data error, not an importer defect.
+- Production guardrails remained unchanged: `/opt/torr-arr-importer/importer.py` reports v1.4.0; Radarr/Sonarr 1080p timers remain inactive (enabled); v1.4.1 was not run against production SQLite.
+
+**Not yet validated:** CPU deltas under controlled repeatable load, comparison against the v1.3.5 executable, multi-hash queue load at realistic batch sizes, cross-profile concurrency on the host, and any production importer execution. No public v1.3.5 Git tag was found, and the host's local backup directory is not readable by the unprivileged account; permissions were not changed.
 
 ## v1.4.0 superseded draft — non-blocking verification
 
@@ -55,7 +72,7 @@ The earlier v1.4.0 draft on `feature/nonblocking-hash-get-v1.4.0` passed its ori
 
 ## v1.4.1 acceptance contract: hash-addressed in-run verification
 
-**Status: implementation committed to the v1.4.1 candidate branch; GitHub Actions run [#156](https://github.com/evgendman/arr2torr/actions/runs/41210258165) passed on Python 3.11, 3.12 and 3.14 with 61 tests per version, compilation and version check.** Comparative request/CPU measurements and separately authorized live-host validation remain. On MINI-Ubuntu, v1.4.0 candidate code is present on disk but both timers remain stopped and production SQLite has not been migrated or used by it. The last live-validated behavior is v1.3.5.
+**Status: implementation committed to the v1.4.1 candidate branch; GitHub Actions run [#157](https://github.com/evgendman/arr2torr/actions/runs/41210488097) passed on Python 3.11, 3.12 and 3.14 with 61 tests per version, compilation and version check.** An isolated real-TorrServer API smoke test on MINI-Ubuntu passed on 2026-10-31 without production SQLite, production importer invocation, or `action=add`/`action=list` reaching TorrServer. Representative CPU/request-count comparisons and production importer deployment validation remain. On MINI-Ubuntu, v1.4.0 candidate code remains at the production path, both timers are inactive, and production SQLite has not been migrated or used by v1.4.1. The last production Arr workflow live-validated behavior is v1.3.5.
 
 ### Goals and agreed design
 
@@ -105,9 +122,10 @@ The earlier v1.4.0 draft on `feature/nonblocking-hash-get-v1.4.0` passed its ori
 - [x] Keep the successful-import rule strict: only usable `FileStats` for the exact hash may create an `imports` record. Keep intentionally removed, previously confirmed hashes protected in normal mode.
 - [x] Ensure `max_add_attempts` counts only actual `add` requests; read-only `get` checks do not consume attempts.
 - [x] Preserve `--rebuild`, `--retry-failed`, terminal blocklisting, Seerr Watchlist, Apprise notifications and in-place SQLite migration semantics.
-- [x] Add regression tests for immediate-ready add responses, shared multi-hash polling, immediate queue removal on success, independent per-hash timeout, pending preservation after timeout, exact-hash get, DB-only reactivation, absent hashes, in-run 404 exclusion from the two-run safeguard, ambiguous 404 across separate runs, transient read failures, deliberate user removal, rebuild and cross-instance concurrent claims. GitHub Actions run [#156](https://github.com/evgendman/arr2torr/actions/runs/41210258165) passed on Python 3.11, 3.12 and 3.14 with 61 tests per version.
-- [ ] Compare before/after request counts and CPU usage on MINI-Ubuntu with an idle library, one pending hash, a small batch and a larger library. Verify that full-library FileStats generation is eliminated from importer polling and that the four Arr profiles do not create duplicate work.
-- [ ] Validate on MINI-Ubuntu before declaring the change complete. Do not reset or delete the shared SQLite database during deployment or testing.
+- [x] Add regression tests for immediate-ready add responses, shared multi-hash polling, immediate queue removal on success, independent per-hash timeout, pending preservation after timeout, exact-hash get, DB-only reactivation, absent hashes, in-run 404 exclusion from the two-run safeguard, ambiguous 404 across separate runs, transient read failures, deliberate user removal, rebuild and cross-instance concurrent claims. GitHub Actions run [#157](https://github.com/evgendman/arr2torr/actions/runs/41210488097) passed on Python 3.11, 3.12 and 3.14 with 61 tests per version.
+- [ ] Measure request counts and CPU on MINI-Ubuntu under repeatable idle, one-pending-hash, small-batch and larger-library cases; compare against v1.3.5 using an accessible, verified copy. The 2026-10-31 one-request response-size sample is recorded above but is not this benchmark.
+- [x] Run an isolated, read-only v1.4.1 smoke test against the real MINI-Ubuntu TorrServer API using temporary Arr/config/SQLite components and a proxy that blocks every action except exact-hash get; verify DB-only to usable-FileStats recovery. See the 2026-10-31 record above.
+- [ ] Complete separately authorized production importer validation on MINI-Ubuntu. Do not enable timers, migrate/use production SQLite or install v1.4.1 until the deployment step is explicitly approved. Do not reset or delete the shared production SQLite database during testing.
 
 ### Scope boundary
 
