@@ -15,7 +15,7 @@ This document separates the installed torr-arr-importer revision, observed live 
 - Preserves the two-distinct-run 404 safeguard after an accepted add. Repeated 404 responses inside one carousel are counted at most once in that importer execution.
 - Keeps the shared SQLite state, atomic cross-instance claims, deliberate-removal protection, retry/backoff, Radarr/Sonarr blocklisting, Seerr Watchlist and notification paths.
 
-**Validation still required:** GitHub Actions on Python 3.11 and 3.12, comparative request/CPU checks, and separately authorized live-host validation. Do not install the candidate on MINI-Ubuntu merely because the branch exists.
+**Validation remaining:** comparative request/CPU checks and separately authorized live-host validation on MINI-Ubuntu. CI is green in [run #153](https://github.com/evgendman/arr2torr/actions/runs/41209023839). Do not install the candidate merely because CI passed.
 
 ## v1.4.0 superseded draft — non-blocking verification
 
@@ -55,7 +55,7 @@ The earlier v1.4.0 draft on `feature/nonblocking-hash-get-v1.4.0` passed its ori
 
 ## v1.4.1 acceptance contract: hash-addressed in-run verification
 
-**Status: implementation committed to the v1.4.1 candidate branch; CI and comparative measurements are pending.** The installed MINI-Ubuntu service remains v1.3.5 until candidate CI and separately authorized live validation pass.
+**Status: implementation committed to the v1.4.1 candidate branch; GitHub Actions run [#153](https://github.com/evgendman/arr2torr/actions/runs/41209023839) passed on Python 3.11 and 3.12 with 61 tests per version, compilation and version check.** Comparative request/CPU measurements and separately authorized live-host validation remain. MINI-Ubuntu remains on v1.3.5.
 
 ### Goals and agreed design
 
