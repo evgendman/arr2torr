@@ -607,6 +607,7 @@ class StateMigrationTests(unittest.TestCase):
             self.assertIn("seerr_watchlist_status", initialized_columns[0])
             self.assertIn("seerr_watchlist_warning_notified_at", initialized_columns[0])
             self.assertIn("metadata_activation_attempt", initialized_columns[0])
+            self.assertIn("missing_observations", initialized_columns[0])
             self.assertEqual(initialized_columns[0], initialized_columns[1])
 
     def test_v11_database_migrates_in_place_and_baselines_old_failed_rows(self):
@@ -672,6 +673,9 @@ class StateMigrationTests(unittest.TestCase):
                 item["name"] for item in db.conn.execute("PRAGMA table_info(pending_adds)")
             })
             self.assertIn("metadata_activation_attempt", {
+                item["name"] for item in db.conn.execute("PRAGMA table_info(pending_adds)")
+            })
+            self.assertIn("missing_observations", {
                 item["name"] for item in db.conn.execute("PRAGMA table_info(pending_adds)")
             })
             self.assertEqual(db.unnotified_terminal_failures("radarr-1080"), [])
