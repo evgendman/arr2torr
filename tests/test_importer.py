@@ -446,6 +446,7 @@ class BatchVerificationTests(unittest.TestCase):
             db.close()
 
 
+
     def test_due_retry_checks_exact_hash_then_increments_only_real_add_attempt(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = make_config(Path(tmp))
@@ -476,12 +477,13 @@ class BatchVerificationTests(unittest.TestCase):
                 rc = importer.run(cfg)
 
             self.assertEqual(rc, 0)
-            self.assertEqual(get_mock.call_count, 2)  # pre-add check + first in-run check
+            self.assertEqual(get_mock.call_count, 2)  # pre-add check + in-run reconciliation
             add_mock.assert_called_once()
             db = importer.StateDB(cfg.state_db)
-            self.assertEqual(db.pending_rows()[0]["attempt_count"], 2)
-            self.assertEqual(db.pending_rows()[0]["status"], "pending")
-            self.assertEqual(db.pending_rows()[0]["missing_observations"], 1)
+            row = db.pending_rows()[0]
+            self.assertEqual(row["attempt_count"], 2)
+            self.assertEqual(row["status"], "pending")
+            self.assertEqual(row["missing_observations"], 0)
             db.close()
     def test_new_candidate_is_claimed_before_first_get_and_queued_after_add(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -523,8 +525,11 @@ class BatchVerificationTests(unittest.TestCase):
             add_mock.assert_called_once()
             sleep_mock.assert_called_once()
             db = importer.StateDB(cfg.state_db)
-            self.assertEqual(db.pending_rows()[0]["attempt_count"], 1)
-            self.assertEqual(db.pending_rows()[0]["missing_observations"], 1)
+            row = db.pending_rows()[0]
+            self.assertEqual(row["attempt_count"], 1)
+            # The post-add 404 inside this same run is not a distinct-run
+            # missing observation; the next timer run must establish that.
+            self.assertEqual(row["missing_observations"], 0)
             db.close()
     def test_transient_get_error_is_retried_in_the_same_queue_without_add(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -644,6 +649,57 @@ class BatchVerificationTests(unittest.TestCase):
             db = importer.StateDB(cfg.state_db)
             self.assertEqual(db.all_hashes(), {HASH1, HASH2})
             self.assertEqual(db.pending_rows(), [])
+            db.close()
+
+
+    def test_queue_deadlines_are_individual_and_do_not_extend_each_other(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            cfg.verification_timeout_sec = 10
+            grabs = [
+                make_grab(HASH1, 1, "First Movie"),
+                make_grab(HASH2, 2, "Second Movie"),
+            ]
+            clock = FakeClock()
+            initial_calls = {HASH1: 0, HASH2: 0}
+
+            def get_item(_cfg, _ts, torrent_hash):
+                # The second candidate enters the queue four seconds later.
+                initial_calls[torrent_hash] += 1
+                if initial_calls[torrent_hash] == 1:
+                    if torrent_hash == HASH2:
+                        clock.sleep(4.0)
+                    return {
+                        "hash": torrent_hash, "stat": 1,
+                        "stat_string": "Torrent getting info",
+                    }
+                if torrent_hash == HASH2 and clock.now >= 10.0:
+                    return ready_record(HASH2, "Second Movie")
+                return {
+                    "hash": torrent_hash, "stat": 1,
+                    "stat_string": "Torrent getting info",
+                }
+
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=grabs),
+                mock.patch.object(importer, "fetch_torrserver_item", side_effect=get_item) as get_mock,
+                mock.patch.object(importer, "fetch_media", return_value={"tmdbId": 123}),
+                mock.patch.object(importer, "add_to_torrserver") as add_mock,
+                mock.patch.object(importer.time, "monotonic", side_effect=clock.monotonic),
+                mock.patch.object(importer.time, "sleep", side_effect=clock.sleep),
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 0)
+            add_mock.assert_not_called()
+            # First entered at t=0 and times out at t=10. The second entered
+            # at t=4, remains eligible until t=14 and succeeds after t=10.
+            self.assertEqual(clock.now, 10.0)
+            db = importer.StateDB(cfg.state_db)
+            rows = {row["hash"]: row for row in db.pending_rows()}
+            self.assertEqual(rows[HASH1]["last_status"], "verification-timeout-deferred")
+            self.assertIn(HASH2, db.all_hashes())
+            self.assertNotIn(HASH2, rows)
             db.close()
 
     def test_present_file_stats_reset_consecutive_missing_observations(self):

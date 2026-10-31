@@ -2412,6 +2412,7 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
 
         def enqueue_verification(
             torrent_hash: str, grab: Grab | None, attempt_count: int, reason: str,
+            *, add_submitted_in_run: bool = False,
         ) -> None:
             h = torrent_hash.lower()
             if h in verification_queue:
@@ -2422,6 +2423,7 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                 "attempt_count": max(0, int(attempt_count)),
                 "deadline": deadline,
                 "missing_recorded": False,
+                "add_submitted_in_run": add_submitted_in_run,
             }
             logging.info(
                 "VERIFY_QUEUED source=%s hash=%s attempts=%d timeout_sec=%d "
@@ -2690,7 +2692,10 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                         db.update_pending_media(h, media)
                     attempt = submit_add(current_grab, media, resolved_link)
                     if attempt:
-                        enqueue_verification(h, current_grab, attempt, "pending-retry-add")
+                        enqueue_verification(
+                            h, current_grab, attempt, "pending-retry-add",
+                            add_submitted_in_run=True,
+                        )
                     continue
 
                 misses = db.record_missing_observation(h, str(exc))
@@ -2790,7 +2795,9 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                 db.update_pending_media(h, media)
                 attempt = submit_add(grab, media, resolved_link)
                 if attempt:
-                    enqueue_verification(h, grab, attempt, "new-candidate-add")
+                    enqueue_verification(
+                        h, grab, attempt, "new-candidate-add", add_submitted_in_run=True,
+                    )
                 continue
             except Exception as exc:
                 logging.warning(
@@ -2896,6 +2903,18 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
 
                     attempt_count = int(entry["attempt_count"])
                     current_grab = entry["grab"]
+                    if entry.get("add_submitted_in_run"):
+                        # A 404 shortly after this run's own add is not one of
+                        # the two distinct-run absence observations. Defer the
+                        # first eligible observation to the next importer run.
+                        logging.info(
+                            "VERIFY_GET_MISSING_AFTER_ADD_IN_RUN source=%s hash=%s "
+                            "attempts=%d counted=false",
+                            cfg.name, h, attempt_count,
+                        )
+                        verification_queue.pop(h, None)
+                        continue
+
                     if attempt_count == 0:
                         if current_grab is None:
                             logging.warning(
@@ -2914,6 +2933,7 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                         attempt = submit_add(current_grab, media, resolved_link)
                         if attempt:
                             entry["attempt_count"] = attempt
+                            entry["add_submitted_in_run"] = True
                             logging.info(
                                 "VERIFY_QUEUE_ADD source=%s hash=%s attempt=%d",
                                 cfg.name, h, attempt,

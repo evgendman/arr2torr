@@ -56,7 +56,7 @@ With the usual five-minute timer, a successfully grabbed release is normally tra
 - Identifies each torrent by its BitTorrent infohash (the history field data.torrentInfoHash).
 - Handles the paginated /api/v3/history response and scans available history on each run, so it does not rely on a fragile “last processed timestamp”.
 - Deduplicates repeated history records for the same infohash, keeping the newest record.
-- Reads the current TorrServer torrent list and compares hashes before adding anything.
+- Checks only relevant hashes through exact-hash TorrServer `action=get`; ordinary and rebuild processing do not fetch the full TorrServer inventory.
 - Resolves the Arr history data.downloadUrl. In the tested Prowlarr setup, this URL redirects to the original magnet link.
 - Adds the torrent through TorrServer's /torrents API, including the Arr title, media category and a safe subset of Arr metadata in data.
 - Uses one shared SQLite database across all importer instances for verified imports and restart-safe pending attempts.
@@ -207,7 +207,7 @@ The current stored data subset includes source instance name, media type, target
 - [Roadmap and validation status](ROADMAP.md)
 - [Version history](CHANGELOG.md)
 
-The installed and live-validated runtime remains **torr-arr-importer v1.3.5**. The v1.4.0 candidate is developed separately on `feature/nonblocking-hash-get-v1.4.0` and must pass CI and MINI-Ubuntu validation before deployment. The service uses Python 3.11+ and the standard library; it does not require external Python packages.
+The installed and live-validated runtime remains **torr-arr-importer v1.3.5**. The v1.4.1 candidate is developed separately on `feature/in-run-get-verification-v1.4.1` and must pass CI, comparative measurements and separately authorized MINI-Ubuntu validation before deployment. The service uses Python 3.11+ and the standard library; it does not require external Python packages.
 
 ## Related project: STRM/NFO library generation
 
@@ -215,8 +215,8 @@ The installed and live-validated runtime remains **torr-arr-importer v1.3.5**. T
 
 ## Current status
 
-MINI-Ubuntu is still running **torr-arr-importer v1.3.5**. The separate v1.4.0 candidate is under development on `feature/nonblocking-hash-get-v1.4.0`; it has not been installed or live-tested on the host. The v1.3.5 source identity and live validation are documented in the historical validation section of [Roadmap](ROADMAP.md).
+MINI-Ubuntu is still running **torr-arr-importer v1.3.5**. The separate v1.4.1 candidate is under development on `feature/in-run-get-verification-v1.4.1`; it has not been installed or live-tested on the host. The v1.3.5 source identity and live validation are documented in the historical validation section of [Roadmap](ROADMAP.md).
 
 Live logs on 2026-10-29 confirmed 20 fresh/replacement additions reaching `ADDED verification=usable-file-stats`. For Radarr, seven terminally failed release choices reached the native failed-history action and logged `RADARR_BLOCKLIST_BLOCKED`; three grouped critical Apprise notifications were acknowledged with HTTP 200, and five replacements were verified. For Sonarr, five failed release choices logged `SONARR_BLOCKLIST_BLOCKED`; replacement additions for Outer Banks S01, Outer Banks S03 and Dark S03 were verified. No alternative additions for Love, Death & Robots S02/S03 were observed in the reviewed log window, but the native blocklist actions themselves are confirmed. The blocklist implementation/validation milestone is complete for both applications; replacement availability remains dependent on each app's own settings and available releases.
 
-Remaining v1.3.5 follow-ups are to confirm downstream `torr2strm` processing and reassess the 32 historical success rows created under v1.3.3 without resetting SQLite or resurrecting intentionally removed hashes. The v1.4.0 candidate's CI and live-host validation are tracked separately in [Roadmap](ROADMAP.md).
+Remaining v1.3.5 follow-ups are to confirm downstream `torr2strm` processing and reassess the 32 historical success rows created under v1.3.3 without resetting SQLite or resurrecting intentionally removed hashes. The v1.4.1 candidate's CI, comparative measurements and live-host validation are tracked separately in [Roadmap](ROADMAP.md).

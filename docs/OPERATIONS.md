@@ -133,34 +133,36 @@ The Watchlist state is stored in the existing SQLite database. Do not delete the
 
 ## Why a release was not added
 
-Use the HISTORY, HASH_SYNC and per-hash events. There is no TorrServer SNAPSHOT stage in v1.4.0.
+Use the HISTORY, HASH_SYNC and per-hash events. There is no TorrServer SNAPSHOT stage in v1.4.1.
 
 | Log/result | Meaning and next check |
 |---|---|
 | skipped_no_data / skipped_no_hash / skipped_no_url | The Arr history record does not contain the data needed to identify or transfer the chosen torrent. |
 | SKIPPED_PRESENT | Exact-hash get returned usable FileStats; the hash was added to shared verified history. |
-| PENDING_EXISTING / PENDING_METADATA | Exact-hash get found an object but its file structure is not ready. The importer waits for a later timer run and does not send a duplicate add. |
-| ADD_ACCEPTED_PENDING | TorrServer acknowledged add, but the immediate response did not contain usable FileStats. It remains pending. |
+| PENDING_EXISTING / PENDING_METADATA | Exact-hash get found an object but its file structure is not ready. The importer queues it for repeated in-run get checks and does not send a duplicate add. |
+| ADD_ACCEPTED_PENDING | TorrServer acknowledged add, but the immediate response did not contain usable FileStats. It enters the shared in-run queue. |
 | PENDING_GET_MISSING | Exact-hash get returned 404. The log reports consecutive observations; the first 404 after an accepted add does not immediately trigger another add. |
 | PENDING_GET_FAILED / TORRSERVER_GET_FAILED | The read failed for a reason other than 404. This is an unknown observation, not evidence that the torrent is absent. |
-| ADD_REJECTED / ADD_UNCERTAIN | The add was rejected or its outcome is unknown. The pending row is reconciled through later get requests. |
+| ADD_REJECTED / ADD_UNCERTAIN | The add was rejected or its outcome is unknown. An uncertain outcome joins the current run's read-only get carousel. |
 | candidates=0 | No eligible new hashes were found. If there is also no pending work due for observation, TorrServer receives no request. |
 
-## Asynchronous add verification (v1.4.0 candidate)
+## In-run add verification (v1.4.1 candidate)
 
-The immediate action=add response is checked for usable FileStats. ADDED is logged immediately only when the exact expected hash has a non-empty usable file list, positive unique IDs and unique safe relative paths. An HTTP acknowledgement, echoed hash or status string such as Torrent added, Torrent getting info, Torrent working or Torrent in db is never sufficient on its own.
+The immediate `action=add` response is checked for usable FileStats. ADDED is logged immediately only when the exact expected hash has a non-empty usable file list, positive unique IDs and unique safe relative paths. An HTTP acknowledgement, echoed hash or status string such as Torrent added, Torrent getting info, Torrent working or Torrent in db is never sufficient on its own.
 
-When the add response is incomplete, arr2torr persists the pending state and ends the current run. It does not execute an in-process polling loop, sleep for 120 seconds or fetch a full action=list snapshot. Later systemd timer runs inspect only the unresolved hash with action=get.
+After the initial pass over pending hashes and all new candidates, arr2torr runs one shared carousel. It repeats exact-hash `action=get` requests at `verification_poll_interval_sec` (default 3 seconds) for every unresolved candidate. A hash is removed immediately after usable FileStats appear; the importer does not continue polling that hash.
 
-A present-but-incomplete object remains pending. On TorrServer MatriX.145, a DB-only Torrent in db get can start reloading the torrent into memory; the importer simply observes it on a later run rather than issuing another metadata-activation add. A 404 after a previously accepted add is recorded, and a second 404 on a separate timer run is required before the existing bounded retry/backoff policy is entered. Network errors and 5xx responses do not count as absence.
+Every hash has an independent `verification_timeout_sec` deadline (default 120 seconds), starting when it enters the queue. Expiration ends only that hash's current wait and leaves its pending row for the next timer invocation. It does not increment `attempt_count`, trigger blocklisting or create a separate metadata-failure counter.
+
+A present-but-incomplete object remains pending and is never blindly re-added. On TorrServer MatriX.145, a DB-only `Torrent in db` response from `action=get` can start reloading the torrent into memory; subsequent carousel reads in the same run observe that transition.
+
+A 404 after a previously accepted add is counted at most once per importer run, and two observations from separate runs are required before entering bounded retry/backoff. A 404 returned by the carousel shortly after an `add` submitted in the same run is not counted toward that threshold. It is left pending for the next run. Network errors and 5xx responses remain unknown observations, not evidence of absence.
 
 The shared state database contains:
-- imports: hashes confirmed by usable FileStats; this also protects intentionally removed torrents from automatic resurrection in normal mode.
-- pending_adds: unresolved claims, actual add-attempt count, missing-observation count, retry state and notification/blocklist state. The original download URL and API keys are not stored. The missing_observations column is added through an in-place migration.
+- `imports`: hashes confirmed by usable FileStats; this protects intentionally removed torrents from automatic resurrection in normal mode.
+- `pending_adds`: unresolved claims, actual add-attempt count, missing-observation count, retry state and notification/blocklist state. The original download URL and API keys are not stored. The `missing_observations` column is added through an in-place migration.
 
-Only actual action=add submissions increment attempt_count; action=get observations do not consume max_add_attempts. Pending rows survive process restarts. A pending item is promoted to imports only after usable FileStats are observed. --retry-failed explicitly re-queues exhausted unverified attempts, while --rebuild is the deliberate exception to the normal successful-import safeguard.
-
-The 120-second verification deadline and three-second polling interval are retained as accepted legacy configuration keys for compatibility; the v1.4.0 candidate no longer uses them to wait for metadata inside a run. verification_timeout_sec remains stored as legacy diagnostic deadline metadata, not as an expiry that can fail a pending torrent.
+Only actual `action=add` submissions increment `attempt_count`; `action=get` observations do not consume `max_add_attempts`. Pending rows survive process restarts. A pending item is promoted to imports only after usable FileStats are observed. `--retry-failed` explicitly re-queues exhausted unverified attempts, while `--rebuild` is the deliberate exception to the normal successful-import safeguard.
 
 ## API and authentication errors
 
