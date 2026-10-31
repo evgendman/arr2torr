@@ -28,7 +28,7 @@ from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 
-VERSION = "1.3.5"
+VERSION = "1.4.0"
 DEFAULT_PAGE_SIZE = 1000
 DEFAULT_TIMEOUT = 30
 
@@ -373,6 +373,7 @@ class StateDB:
                 last_checked_at TEXT,
                 last_status TEXT,
                 metadata_activation_attempt INTEGER,
+                missing_observations INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT,
                 next_retry_at TEXT,
                 notification_attempted_at TEXT,
@@ -443,6 +444,7 @@ class StateDB:
             "media_title": "TEXT",
             "title_slug": "TEXT",
             "metadata_activation_attempt": "INTEGER",
+            "missing_observations": "INTEGER NOT NULL DEFAULT 0",
             "notification_attempted_at": "TEXT",
             "notification_attempt_count": "INTEGER NOT NULL DEFAULT 0",
             "notification_next_retry_at": "TEXT",
@@ -647,6 +649,186 @@ class StateDB:
             self.conn.rollback()
             raise
 
+    def claim_pending(
+        self,
+        grab: Grab,
+        source: str,
+        media: dict[str, Any],
+        verification_timeout_sec: int,
+        *,
+        allow_known: bool = False,
+    ) -> bool:
+        """Atomically reserve a hash without counting an add attempt.
+
+        A claim is used before an add or while tracking a live but incomplete
+        object. Only start_add_attempt() increments the add-attempt counter.
+        """
+        now_dt = datetime.now(timezone.utc)
+        now_text = now_dt.isoformat()
+        deadline_text = (now_dt + timedelta(seconds=verification_timeout_sec)).isoformat()
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            if not allow_known and self.conn.execute(
+                "SELECT 1 FROM imports WHERE hash = ?", (grab.hash,)
+            ).fetchone():
+                self.conn.commit()
+                return False
+
+            existing = self.conn.execute(
+                "SELECT source, status, next_retry_at FROM pending_adds WHERE hash = ?",
+                (grab.hash,),
+            ).fetchone()
+            if existing:
+                if str(existing["source"] or "") != source:
+                    self.conn.commit()
+                    return False
+                status = str(existing["status"] or "")
+                if status in {"pending", "failed"}:
+                    self.conn.commit()
+                    return False
+                if status != "retry_wait":
+                    self.conn.commit()
+                    return False
+                due = parse_iso_datetime(existing["next_retry_at"])
+                if due is None or due > now_dt:
+                    self.conn.commit()
+                    return False
+                cur = self.conn.execute(
+                    """
+                    UPDATE pending_adds
+                    SET arr_history_id=?, arr_media_id=?, download_id=?, title=?,
+                        media_title=COALESCE(?, media_title),
+                        title_slug=COALESCE(?, title_slug),
+                        imdb_id=COALESCE(?, imdb_id),
+                        tmdb_id=COALESCE(?, tmdb_id),
+                        tvdb_id=COALESCE(?, tvdb_id),
+                        status='pending', requested_at=?, deadline_at=?,
+                        next_retry_at=NULL, last_checked_at=NULL,
+                        last_status='retry-due-claim', last_error=NULL,
+                        missing_observations=0
+                    WHERE hash=? AND source=? AND status='retry_wait'
+                    """,
+                    (
+                        grab.history_id, grab.arr_media_id,
+                        str(grab.data.get("downloadId") or grab.download_id or "") or None,
+                        grab.source_title,
+                        str(media.get("title") or "") or None,
+                        str(media.get("titleSlug") or "") or None,
+                        str(media.get("imdbId") or "") or None,
+                        str(media.get("tmdbId") or "") or None,
+                        str(media.get("tvdbId") or "") or None,
+                        now_text, deadline_text, grab.hash, source,
+                    ),
+                )
+                self.conn.commit()
+                return cur.rowcount == 1
+
+            self.conn.execute(
+                """
+                INSERT INTO pending_adds
+                  (hash, source, arr_history_id, arr_media_id, download_id, title,
+                   media_title, title_slug, imdb_id, tmdb_id, tvdb_id, requested_at,
+                   deadline_at, attempt_count, status, last_checked_at, last_status,
+                   last_error, next_retry_at, missing_observations)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending',
+                        NULL, 'candidate-claimed', NULL, NULL, 0)
+                """,
+                (
+                    grab.hash, source, grab.history_id, grab.arr_media_id,
+                    str(grab.data.get("downloadId") or grab.download_id or "") or None,
+                    grab.source_title,
+                    str(media.get("title") or "") or None,
+                    str(media.get("titleSlug") or "") or None,
+                    str(media.get("imdbId") or "") or None,
+                    str(media.get("tmdbId") or "") or None,
+                    str(media.get("tvdbId") or "") or None,
+                    now_text, deadline_text,
+                ),
+            )
+            self.conn.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def release_unsubmitted_claim(self, torrent_hash: str) -> bool:
+        """Release only a fresh reservation when preparation failed before any add."""
+        with self.conn:
+            cur = self.conn.execute(
+                """
+                DELETE FROM pending_adds
+                WHERE hash=? AND status='pending' AND attempt_count=0
+                  AND last_status='candidate-claimed'
+                """,
+                (torrent_hash,),
+            )
+        return cur.rowcount == 1
+
+    def start_add_attempt(
+        self, torrent_hash: str, max_attempts: int, verification_timeout_sec: int,
+    ) -> int:
+        """Count an actual add submission, never a read-only get or reservation."""
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat()
+        deadline_text = (now + timedelta(seconds=verification_timeout_sec)).isoformat()
+        with self.conn:
+            cur = self.conn.execute(
+                """
+                UPDATE pending_adds
+                SET attempt_count=attempt_count+1, requested_at=?, deadline_at=?,
+                    last_checked_at=NULL, last_status='add-request-started',
+                    last_error=NULL, next_retry_at=NULL, missing_observations=0
+                WHERE hash=? AND status='pending' AND attempt_count < ?
+                """,
+                (now_text, deadline_text, torrent_hash, max_attempts),
+            )
+            if cur.rowcount != 1:
+                return 0
+            row = self.conn.execute(
+                "SELECT attempt_count FROM pending_adds WHERE hash=?", (torrent_hash,)
+            ).fetchone()
+            return int(row["attempt_count"])
+
+    def record_missing_observation(self, torrent_hash: str, reason: str) -> int:
+        """Record one consecutive 404 observation for an already-pending hash."""
+        with self.conn:
+            self.conn.execute(
+                """
+                UPDATE pending_adds
+                SET missing_observations=missing_observations+1,
+                    last_checked_at=?, last_status='action-get-404', last_error=?
+                WHERE hash=? AND status='pending'
+                """,
+                (iso_now(), reason[:1000], torrent_hash),
+            )
+            row = self.conn.execute(
+                "SELECT missing_observations FROM pending_adds WHERE hash=?",
+                (torrent_hash,),
+            ).fetchone()
+        return int(row["missing_observations"]) if row else 0
+
+    def update_pending_media(self, torrent_hash: str, media: dict[str, Any]) -> None:
+        with self.conn:
+            self.conn.execute(
+                """
+                UPDATE pending_adds
+                SET media_title=COALESCE(?, media_title),
+                    title_slug=COALESCE(?, title_slug),
+                    imdb_id=COALESCE(?, imdb_id),
+                    tmdb_id=COALESCE(?, tmdb_id),
+                    tvdb_id=COALESCE(?, tvdb_id)
+                WHERE hash=?
+                """,
+                (
+                    str(media.get("title") or "") or None,
+                    str(media.get("titleSlug") or "") or None,
+                    str(media.get("imdbId") or "") or None,
+                    str(media.get("tmdbId") or "") or None,
+                    str(media.get("tvdbId") or "") or None,
+                    torrent_hash,
+                ),
+            )
+
     def metadata_activation_attempt(self, torrent_hash: str) -> int | None:
         row = self.conn.execute(
             "SELECT metadata_activation_attempt FROM pending_adds WHERE hash = ?",
@@ -679,7 +861,8 @@ class StateDB:
             self.conn.execute(
                 """
                 UPDATE pending_adds
-                SET last_checked_at = ?, last_status = ?, last_error = COALESCE(?, last_error)
+                SET last_checked_at = ?, last_status = ?, last_error = COALESCE(?, last_error),
+                    missing_observations = 0
                 WHERE hash = ? AND status = 'pending'
                 """,
                 (iso_now(), observed_status[:200], error[:1000] if error else None, torrent_hash),
@@ -694,6 +877,7 @@ class StateDB:
                 UPDATE pending_adds
                 SET status = 'pending', deadline_at = ?, last_checked_at = ?,
                     last_status = ?, last_error = NULL, next_retry_at = NULL,
+                    missing_observations = 0,
                     notification_attempted_at = NULL,
                     radarr_blocklist_status = NULL,
                     radarr_blocklist_last_error = NULL,
@@ -2181,7 +2365,7 @@ def add_to_torrserver(cfg: Config, ts: HttpClient, grab: Grab, media: dict[str, 
         "save_to_db": True,
     }
     url = normalize_url(cfg.torrserver_url, "/torrents")
-    response = ts.request_json("POST", url, payload=payload, retry_count=cfg.retry_count, retry_delay=cfg.retry_delay)
+    response = ts.request_json("POST", url, payload=payload, retry_count=0)
     if not isinstance(response, dict):
         raise ImporterError(f"TorrServer add returned unexpected response for hash={grab.hash}")
     response_hash = str(response.get("hash") or "").strip().lower()
@@ -2199,8 +2383,9 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
     cfg = cfg.normalized()
     started = time.monotonic()
     logging.info(
-        "START source=%s type=%s category=%s target_quality=%s verification_timeout_sec=%s",
-        cfg.name, cfg.arr_type, cfg.category, cfg.target_quality, cfg.verification_timeout_sec,
+        "START source=%s type=%s category=%s target_quality=%s mode=%s",
+        cfg.name, cfg.arr_type, cfg.category, cfg.target_quality,
+        "dry-run" if dry_run else ("rebuild" if rebuild else "normal"),
     )
 
     lock = ProcessLock(cfg.lock_file)
@@ -2211,259 +2396,57 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
     try:
         try:
             grabs = fetch_history(cfg, arr)
-            ts_records = fetch_torrserver(cfg, ts)
         except ImporterError:
-            logging.exception("SYNC_FAILED source=%s stage=fetch", cfg.name)
+            logging.exception("SYNC_FAILED source=%s stage=history", cfg.name)
             return 2
 
-        ts_by_hash = {
-            str(record.get("hash") or "").strip().lower(): record
-            for record in ts_records
-            if str(record.get("hash") or "").strip()
-        }
-        ts_hashes = set(ts_by_hash)
         imported_hashes = db.all_hashes()
-        added = 0
-        failed = 0
-        submitted = 0
-        history_count = len(grabs)
-        known_count = sum(1 for grab in grabs if grab.hash in imported_hashes)
-
         if retry_failed and not dry_run:
             requeued = db.requeue_failed(cfg.name)
             logging.warning("RETRY_FAILED source=%s requeued=%d", cfg.name, requeued)
 
-        # Reconcile persisted state against successful-import history and the FileStats contract.
-        # Hash presence alone is intermediate; previously imported hashes remain protected from
-        # automatic resurrection when they have intentionally been removed from TorrServer.
         grabs_by_hash = {grab.hash.lower(): grab for grab in grabs if grab.hash}
         media_cache: dict[int, dict[str, Any]] = {}
-        if not dry_run:
-            for pending in db.pending_rows(source=cfg.name):
-                status = str(pending.get("status") or "")
-                if status not in {"pending", "retry_wait", "failed"}:
-                    continue
-                h = str(pending.get("hash") or "").lower()
+        added = failed = submitted = skipped_present = present_incomplete = 0
 
-                if h in imported_hashes:
-                    db.confirm_pending(h)
-                    logging.info(
-                        "PENDING_CLEARED source=%s hash=%s reason=already-in-import-history",
-                        cfg.name, h,
-                    )
-                    continue
+        def media_for(grab: Grab, pending: dict[str, Any] | None = None) -> dict[str, Any]:
+            media_id = grab.arr_media_id
+            if media_id and media_id in media_cache:
+                return media_cache[media_id]
 
-                record = ts_by_hash.get(h)
-                evidence = verification_evidence(record)
-                if evidence:
-                    completed = db.confirm_pending(h)
-                    if completed is not None:
-                        imported_hashes.add(h)
-                        added += 1
-                        logging.info(
-                            "ADDED source=%s hash=%s verification=%s recovery=true",
-                            cfg.name, h, evidence,
-                        )
-                    continue
-
-                # If a persisted DB-only entry is not active, re-add only to activate its metadata.
-                # Never issue even this activation request after the verification deadline expired.
-                # A live object is inspected via action=get; it is never blindly added again.
-                current_deadline = pending_deadline(pending)
-                verification_window_open = (
-                    current_deadline is None or datetime.now(timezone.utc) < current_deadline
-                )
-                if status == "pending" and record is not None and verification_window_open:
-                    attempt_count = int(pending.get("attempt_count") or 0)
-                    if is_db_only_record(record):
-                        current_grab = grabs_by_hash.get(h)
-                        if (
-                            current_grab is not None
-                            and db.metadata_activation_attempt(h) != attempt_count
-                            and db.mark_metadata_activation_attempt(h, attempt_count)
-                        ):
-                            try:
-                                media = media_cache.get(current_grab.arr_media_id) if current_grab.arr_media_id else None
-                                if media is None:
-                                    media = fetch_media(cfg, arr, current_grab)
-                                    if current_grab.arr_media_id:
-                                        media_cache[current_grab.arr_media_id] = media
-                                if not current_grab.download_url:
-                                    raise ImporterError(f"hash={h} has no downloadUrl for DB-only metadata activation")
-                                resolved_link = (
-                                    ts.resolve_link(current_grab.download_url)
-                                    if cfg.resolve_download_url else current_grab.download_url
-                                )
-                                response = add_to_torrserver(
-                                    cfg, ts, current_grab, media, resolved_link=resolved_link,
-                                )
-                                response_status = str(
-                                    response.get("stat_string") or response.get("statString") or "accepted"
-                                )
-                                submitted += 1
-                                db.observe_pending(h, "metadata-activation-accepted: " + response_status)
-                                logging.info(
-                                    "METADATA_ACTIVATION_ACCEPTED source=%s hash=%s attempt=%d stat=%s",
-                                    cfg.name, h, attempt_count, response_status,
-                                )
-                            except Exception as exc:
-                                db.observe_pending(h, "metadata-activation-failed", str(exc))
-                                logging.warning(
-                                    "METADATA_ACTIVATION_FAILED source=%s hash=%s attempt=%d error=%s",
-                                    cfg.name, h, attempt_count, exc,
-                                )
-                    else:
-                        try:
-                            details = fetch_torrserver_item(cfg, ts, h)
-                            detail_evidence = verification_evidence(details)
-                            if detail_evidence:
-                                completed = db.confirm_pending(h)
-                                if completed is not None:
-                                    imported_hashes.add(h)
-                                    added += 1
-                                    logging.info(
-                                        "ADDED source=%s hash=%s verification=%s recovery=action-get",
-                                        cfg.name, h, detail_evidence,
-                                    )
-                                continue
-                            db.observe_pending(
-                                h, "action-get-incomplete: " + torrserver_status(details)
-                                + "; " + str(file_stats_problem(details)),
-                            )
-                        except HttpStatusError as exc:
-                            db.observe_pending(
-                                h, "action-get-not-found" if exc.code == 404 else "action-get-failed", str(exc),
-                            )
-                            logging.warning(
-                                "METADATA_RECOVERY_GET_FAILED source=%s hash=%s http_status=%s error=%s",
-                                cfg.name, h, exc.code, exc,
-                            )
-                        except Exception as exc:
-                            db.observe_pending(h, "action-get-failed", str(exc))
-                            logging.warning(
-                                "METADATA_RECOVERY_GET_FAILED source=%s hash=%s error=%s",
-                                cfg.name, h, exc,
-                            )
-
-                # A later Radarr Grab of the same infohash represents a new operator-selected
-                # attempt. Do not let a terminal row from the older Grab block it forever.
-                if status == "failed":
-                    current_grab = grabs_by_hash.get(h)
-                    old_history_id = as_int(pending.get("arr_history_id")) or 0
-                    new_history_id = as_int(current_grab.history_id) if current_grab else None
-                    if (
-                        current_grab is not None
-                        and old_history_id > 0
-                        and new_history_id is not None
-                        and new_history_id > old_history_id
-                        and db.rearm_failed_for_new_grab(
-                            current_grab, cfg.name, cfg.verification_timeout_sec,
-                        )
-                    ):
-                        logging.warning(
-                            "REARMED_NEW_GRAB source=%s hash=%s previous_history_id=%d current_history_id=%d reason=new-radarr-grab",
-                            cfg.name, h, old_history_id, new_history_id,
-                        )
-                        continue
-
-                if status == "pending":
-                    deadline = pending_deadline(pending)
-                    if deadline is not None and datetime.now(timezone.utc) >= deadline:
-                        state = db.fail_pending(
-                            h,
-                            "Verification deadline expired before this run; last observed status="
-                            + str(pending.get("last_status") or "unknown"),
-                            cfg.max_add_attempts,
-                            cfg.retry_backoff_sec,
-                        )
-                        failed += 1
-                        logging.error(
-                            "VERIFY_FAILED source=%s hash=%s status=%s attempts=%s reason=deadline-expired",
-                            cfg.name, h, state, pending.get("attempt_count"),
-                        )
-
-        pending_map = {row["hash"]: row for row in db.pending_rows()}
-        now = datetime.now(timezone.utc)
-        candidates: list[Grab] = []
-        retry_candidates: set[str] = set()
-        for grab in grabs:
-            record = ts_by_hash.get(grab.hash)
-            evidence = verification_evidence(record)
-            if evidence:
-                continue
-            if not rebuild and grab.hash in imported_hashes:
-                continue
-            pending = pending_map.get(grab.hash)
-            if pending is not None:
-                if pending_retry_due(pending, cfg.name, now, cfg.max_add_attempts):
-                    candidates.append(grab)
-                    retry_candidates.add(grab.hash)
-                # Any non-due, in-flight, other-source, or exhausted attempt blocks
-                # another add. This also prevents cross-instance duplicate requests.
-                continue
-            # Missing hashes may be added. Present-but-incomplete hashes are observed or
-            # explicitly reactivated only when the snapshot says the object is DB-only.
-            candidates.append(grab)
-
-        skipped_present = sum(1 for grab in grabs if verification_evidence(ts_by_hash.get(grab.hash)))
-        present_incomplete = sum(
-            1 for grab in grabs
-            if grab.hash in ts_by_hash and not verification_evidence(ts_by_hash.get(grab.hash))
-        )
-        skipped_known = sum(
-            1 for grab in grabs
-            if not verification_evidence(ts_by_hash.get(grab.hash))
-            and not rebuild and grab.hash in imported_hashes
-        )
-        logging.info(
-            "SNAPSHOT source=%s arr_grabbed=%d torrserver=%d import_history_known=%d pending=%d candidates=%d present_incomplete=%d mode=%s",
-            cfg.name, history_count, len(ts_hashes), known_count, len(pending_map), len(candidates),
-            present_incomplete, "rebuild" if rebuild else "normal",
-        )
-
-        if dry_run:
-            for grab in candidates:
-                media = media_cache.get(grab.arr_media_id) if grab.arr_media_id else None
-                if media is None:
-                    media = fetch_media(cfg, arr, grab)
-                    if grab.arr_media_id:
-                        media_cache[grab.arr_media_id] = media
-                reason = (
-                    "retry-after-verification-failure" if grab.hash in retry_candidates
-                    else ("rebuild" if rebuild else "new-hash")
-                )
-                logging.info(
-                    "DRY_RUN source=%s hash=%s title=%r imdb=%s tmdb=%s reason=%s",
-                    cfg.name, grab.hash, grab.source_title, media.get("imdbId") or "",
-                    media.get("tmdbId") or "", reason,
-                )
-            logging.info(
-                "DONE source=%s candidates=%d submitted=0 added=0 failed=0 pending=%d "
-                "skipped_present=%d skipped_known=%d duration=%.2fs dry_run=true",
-                cfg.name, len(candidates), len(db.pending_rows()), skipped_present,
-                skipped_known, time.monotonic() - started,
+            saved = pending or {}
+            has_saved_media = any(
+                saved.get(key) not in (None, "")
+                for key in ("media_title", "title_slug", "imdb_id", "tmdb_id", "tvdb_id")
             )
-            return 0
+            if has_saved_media:
+                media = {
+                    "title": saved.get("media_title"),
+                    "titleSlug": saved.get("title_slug"),
+                    "imdbId": saved.get("imdb_id"),
+                    "tmdbId": saved.get("tmdb_id"),
+                    "tvdbId": saved.get("tvdb_id"),
+                }
+            else:
+                media = fetch_media(cfg, arr, grab)
+            if media_id:
+                media_cache[media_id] = media
+            return media
 
-        # Submit all eligible candidates first. Each add receives its own deadline;
-        # one shared polling loop below verifies the whole batch without serial waits.
-        for grab in candidates:
-            media = media_cache.get(grab.arr_media_id) if grab.arr_media_id else None
-            record = ts_by_hash.get(grab.hash)
-            needs_add = record is None or is_db_only_record(record)
+        def prepare_add(
+            grab: Grab, pending: dict[str, Any] | None = None,
+        ) -> tuple[dict[str, Any], str] | None:
+            nonlocal failed
+            media: dict[str, Any] = {}
             try:
-                if media is None:
-                    media = fetch_media(cfg, arr, grab)
-                    if grab.arr_media_id:
-                        media_cache[grab.arr_media_id] = media
-                resolved_link = None
-                if needs_add:
-                    if not grab.download_url:
-                        raise ImporterError(f"hash={grab.hash} has no downloadUrl")
-                    resolved_link = (
-                        ts.resolve_link(grab.download_url)
-                        if cfg.resolve_download_url else grab.download_url
-                    )
+                media = media_for(grab, pending)
+                if not grab.download_url:
+                    raise ImporterError(f"hash={grab.hash} has no downloadUrl")
+                resolved_link = (
+                    ts.resolve_link(grab.download_url)
+                    if cfg.resolve_download_url else grab.download_url
+                )
+                return media, resolved_link
             except Exception as exc:
                 failed += 1
                 logging.error(
@@ -2471,101 +2454,62 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                     cfg.name, grab.hash, grab.source_title, exc,
                 )
                 if permanent_preparation_error(exc):
-                    media_for_error = media if isinstance(media, dict) else {}
                     db.record_terminal_event(
                         event_key=f"{cfg.name}:{grab.hash}:prepare",
                         source=cfg.name,
                         arr_type=cfg.arr_type,
                         category=cfg.category,
                         arr_media_id=grab.arr_media_id,
-                        media_title=str(media_for_error.get("title") or "") or None,
+                        media_title=str(media.get("title") or "") or None,
                         release_title=grab.source_title or None,
-                        title_slug=str(media_for_error.get("titleSlug") or "") or None,
+                        title_slug=str(media.get("titleSlug") or "") or None,
                         stage="prepare",
                         reason=str(exc),
-                        tmdb_id=media_for_error.get("tmdbId"),
-                        tvdb_id=media_for_error.get("tvdbId"),
+                        tmdb_id=media.get("tmdbId"),
+                        tvdb_id=media.get("tvdbId"),
                     )
-                continue
+                return None
 
-            reason = (
-                "retry-after-verification-failure" if grab.hash in retry_candidates
-                else ("rebuild" if rebuild else "new-hash")
-            )
-            attempt = db.begin_pending(
-                grab, cfg.name, media, cfg.verification_timeout_sec,
-                allow_known=rebuild,
+        def submit_add(grab: Grab, media: dict[str, Any], resolved_link: str) -> None:
+            nonlocal submitted, added, failed
+            attempt = db.start_add_attempt(
+                grab.hash, cfg.max_add_attempts, cfg.verification_timeout_sec,
             )
             if attempt == 0:
                 logging.info(
-                    "ADD_SKIPPED source=%s hash=%s reason=shared-pending-claim",
+                    "ADD_SKIPPED source=%s hash=%s reason=attempt-limit-or-claim-lost",
                     cfg.name, grab.hash,
                 )
-                continue
-            record = ts_by_hash.get(grab.hash)
-            is_metadata_activation = is_db_only_record(record)
+                return
             logging.info(
-                "%s source=%s hash=%s title=%r imdb=%s tmdb=%s reason=%s attempt=%d",
-                "METADATA_ACTIVATION" if is_metadata_activation else "ADD",
+                "ADD source=%s hash=%s title=%r imdb=%s tmdb=%s attempt=%d",
                 cfg.name, grab.hash, grab.source_title, media.get("imdbId") or "",
-                media.get("tmdbId") or "", reason, attempt,
+                media.get("tmdbId") or "", attempt,
             )
-            if record is not None and not is_metadata_activation:
-                # A live object already exists. Inspect it, but never submit a duplicate add.
-                try:
-                    details = fetch_torrserver_item(cfg, ts, grab.hash)
-                    detail_evidence = verification_evidence(details)
-                    if detail_evidence:
-                        completed = db.confirm_pending(grab.hash)
-                        if completed is not None:
-                            imported_hashes.add(grab.hash)
-                            added += 1
-                            logging.info(
-                                "ADDED source=%s hash=%s verification=%s recovery=action-get",
-                                cfg.name, grab.hash, detail_evidence,
-                            )
-                        continue
-                    db.observe_pending(
-                        grab.hash, "action-get-incomplete: " + torrserver_status(details)
-                        + "; " + str(file_stats_problem(details)),
-                    )
-                except HttpStatusError as exc:
-                    db.observe_pending(
-                        grab.hash, "action-get-not-found" if exc.code == 404 else "action-get-failed", str(exc),
-                    )
-                    logging.warning(
-                        "METADATA_RECOVERY_GET_FAILED source=%s hash=%s http_status=%s error=%s",
-                        cfg.name, grab.hash, exc.code, exc,
-                    )
-                except Exception as exc:
-                    db.observe_pending(grab.hash, "action-get-failed", str(exc))
-                    logging.warning(
-                        "METADATA_RECOVERY_GET_FAILED source=%s hash=%s error=%s",
-                        cfg.name, grab.hash, exc,
-                    )
-                continue
-
-            if is_metadata_activation and not db.mark_metadata_activation_attempt(grab.hash, attempt):
-                logging.info(
-                    "METADATA_ACTIVATION_SKIPPED source=%s hash=%s attempt=%d reason=already-requested",
-                    cfg.name, grab.hash, attempt,
-                )
-                continue
-
             try:
                 response = add_to_torrserver(
                     cfg, ts, grab, media, resolved_link=resolved_link,
                 )
-                response_status = str(response.get("stat_string") or response.get("statString") or "accepted")
-                event_status = (
-                    "metadata-activation-accepted: " + response_status
-                    if is_metadata_activation else "request-accepted: " + response_status
-                )
-                db.observe_pending(grab.hash, event_status)
                 submitted += 1
+                evidence = verification_evidence(response)
+                if evidence:
+                    completed = db.confirm_pending(grab.hash)
+                    if completed is not None:
+                        imported_hashes.add(grab.hash)
+                        added += 1
+                    logging.info(
+                        "ADDED source=%s hash=%s verification=%s immediate=true",
+                        cfg.name, grab.hash, evidence,
+                    )
+                    return
+
+                response_status = str(
+                    response.get("stat_string") or response.get("statString") or "accepted"
+                )
+                db.observe_pending(grab.hash, "add-accepted: " + response_status)
                 logging.info(
-                    "%s source=%s hash=%s stat=%s attempt=%d",
-                    "METADATA_ACTIVATION_ACCEPTED" if is_metadata_activation else "ADD_ACCEPTED",
+                    "ADD_ACCEPTED_PENDING source=%s hash=%s stat=%s attempt=%d "
+                    "verification=await-next-run",
                     cfg.name, grab.hash, response_status, attempt,
                 )
             except HttpStatusError as exc:
@@ -2580,98 +2524,291 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                         cfg.name, grab.hash, exc.code, state, exc,
                     )
                 else:
-                    db.observe_pending(grab.hash, "request-outcome-uncertain", str(exc))
+                    db.observe_pending(grab.hash, "add-outcome-uncertain", str(exc))
                     logging.warning(
-                        "ADD_UNCERTAIN source=%s hash=%s error=%s; verify presence before retry",
+                        "ADD_UNCERTAIN source=%s hash=%s error=%s; reconcile with action=get next run",
                         cfg.name, grab.hash, exc,
                     )
             except Exception as exc:
-                db.observe_pending(grab.hash, "request-outcome-uncertain", str(exc))
+                db.observe_pending(grab.hash, "add-outcome-uncertain", str(exc))
                 logging.warning(
-                    "ADD_UNCERTAIN source=%s hash=%s error=%s; verify presence before retry",
+                    "ADD_UNCERTAIN source=%s hash=%s error=%s; reconcile with action=get next run",
                     cfg.name, grab.hash, exc,
                 )
 
-        while True:
-            active = [
-                row for row in db.pending_rows(source=cfg.name)
-                if row.get("status") == "pending"
-            ]
-            if not active:
-                break
+        if dry_run:
+            pending_map = {row["hash"]: row for row in db.pending_rows()}
+            dry_candidates: list[tuple[Grab, str]] = []
+            now = datetime.now(timezone.utc)
+            for grab in grabs:
+                if not rebuild and grab.hash in imported_hashes:
+                    continue
+                pending = pending_map.get(grab.hash)
+                if pending is not None:
+                    if pending_retry_due(pending, cfg.name, now, cfg.max_add_attempts):
+                        dry_candidates.append((grab, "retry-after-backoff"))
+                    continue
+                dry_candidates.append((grab, "rebuild" if rebuild else "new-hash"))
 
-            try:
-                current_records = fetch_torrserver(cfg, ts)
-                current_by_hash = {
-                    str(record.get("hash") or "").strip().lower(): record
-                    for record in current_records
-                    if str(record.get("hash") or "").strip()
-                }
-                poll_error = None
-            except Exception as exc:
-                current_by_hash = {}
-                poll_error = str(exc)
+            for grab, reason in dry_candidates:
+                try:
+                    media = media_for(grab)
+                except Exception as exc:
+                    logging.warning(
+                        "DRY_RUN_PREPARE_FAILED source=%s hash=%s error=%s",
+                        cfg.name, grab.hash, exc,
+                    )
+                    continue
+                logging.info(
+                    "DRY_RUN source=%s hash=%s title=%r imdb=%s tmdb=%s reason=%s",
+                    cfg.name, grab.hash, grab.source_title, media.get("imdbId") or "",
+                    media.get("tmdbId") or "", reason,
+                )
+            logging.info(
+                "DONE source=%s candidates=%d submitted=0 added=0 failed=0 pending=%d "
+                "duration=%.2fs dry_run=true torrserver_requests=0",
+                cfg.name, len(dry_candidates), len(db.pending_rows()),
+                time.monotonic() - started,
+            )
+            return 0
+
+        # A terminal failure may be re-armed only by a strictly newer Arr Grab
+        # for the same hash. Keep the existing explicit operator-selection rule.
+        for pending in db.pending_rows(source=cfg.name):
+            h = str(pending.get("hash") or "").lower()
+            if h in imported_hashes:
+                db.confirm_pending(h)
+                logging.info(
+                    "PENDING_CLEARED source=%s hash=%s reason=already-in-import-history",
+                    cfg.name, h,
+                )
+                continue
+            if str(pending.get("status") or "") != "failed":
+                continue
+            current_grab = grabs_by_hash.get(h)
+            old_history_id = as_int(pending.get("arr_history_id")) or 0
+            new_history_id = as_int(current_grab.history_id) if current_grab else None
+            if (
+                current_grab is not None and old_history_id > 0
+                and new_history_id is not None and new_history_id > old_history_id
+                and db.rearm_failed_for_new_grab(
+                    current_grab, cfg.name, cfg.verification_timeout_sec,
+                )
+            ):
                 logging.warning(
-                    "VERIFY_POLL_FAILED source=%s pending=%d error=%s",
-                    cfg.name, len(active), exc,
+                    "REARMED_NEW_GRAB source=%s hash=%s previous_history_id=%d "
+                    "current_history_id=%d",
+                    cfg.name, h, old_history_id, new_history_id,
                 )
 
-            now = datetime.now(timezone.utc)
-            for pending in active:
-                h = str(pending["hash"]).lower()
-                record = current_by_hash.get(h)
-                evidence = verification_evidence(record)
-                if evidence:
-                    completed = db.confirm_pending(h)
-                    if completed is not None:
-                        imported_hashes.add(h)
-                        added += 1
-                        requested = parse_iso_datetime(pending.get("requested_at")) or now
-                        logging.info(
-                            "ADDED source=%s hash=%s verification=%s attempt=%s elapsed=%.1fs",
-                            cfg.name, h, evidence, pending.get("attempt_count"),
-                            max(0.0, (now - requested).total_seconds()),
-                        )
+        # Reconcile only this instance's unresolved hashes. Every TorrServer
+        # observation is addressed to one exact hash; no full inventory is fetched.
+        for pending in db.pending_rows(source=cfg.name):
+            h = str(pending.get("hash") or "").lower()
+            if not h:
+                continue
+            if h in imported_hashes:
+                db.confirm_pending(h)
+                continue
+
+            status = str(pending.get("status") or "")
+            current_grab = grabs_by_hash.get(h)
+            retry_due = (
+                status == "retry_wait"
+                and pending_retry_due(
+                    pending, cfg.name, datetime.now(timezone.utc), cfg.max_add_attempts,
+                )
+            )
+            if status == "retry_wait" and not retry_due:
+                continue
+            if status not in {"pending", "retry_wait"}:
+                continue
+
+            try:
+                details = fetch_torrserver_item(cfg, ts, h)
+            except HttpStatusError as exc:
+                if exc.code != 404:
+                    if status == "pending":
+                        db.observe_pending(h, "action-get-failed", str(exc))
+                    logging.warning(
+                        "PENDING_GET_FAILED source=%s hash=%s http_status=%d error=%s",
+                        cfg.name, h, exc.code, exc,
+                    )
                     continue
 
-                status_text = torrserver_status(record)
-                if record is not None:
-                    status_text += "; " + str(file_stats_problem(record))
-                deadline = pending_deadline(pending)
-                if deadline is not None and now >= deadline:
-                    detail = poll_error or f"verification deadline expired; last observed status={status_text}"
-                    previous_error = str(pending.get("last_error") or "").strip()
-                    if previous_error and previous_error not in detail:
-                        detail = detail + "; previous_error=" + previous_error[:500]
-                    state = db.fail_pending(
-                        h, detail, cfg.max_add_attempts, cfg.retry_backoff_sec,
-                    )
-                    failed += 1
-                    requested = parse_iso_datetime(pending.get("requested_at")) or now
-                    logging.error(
-                        "VERIFY_FAILED source=%s hash=%s status=%s attempts=%s elapsed=%.1fs error=%s",
-                        cfg.name, h, state, pending.get("attempt_count"),
-                        max(0.0, (now - requested).total_seconds()), detail,
-                    )
-                else:
-                    db.observe_pending(h, status_text, poll_error)
+                attempt_count = int(pending.get("attempt_count") or 0)
+                if attempt_count == 0 or retry_due:
+                    if current_grab is None:
+                        logging.warning(
+                            "PENDING_MISSING_NO_ARR_RECORD source=%s hash=%s "
+                            "attempts=%d; cannot safely submit without current downloadUrl",
+                            cfg.name, h, attempt_count,
+                        )
+                        continue
+                    prepared = prepare_add(current_grab, pending)
+                    if prepared is None:
+                        continue
+                    media, resolved_link = prepared
+                    if status == "retry_wait":
+                        if not db.claim_pending(
+                            current_grab, cfg.name, media, cfg.verification_timeout_sec,
+                            allow_known=rebuild,
+                        ):
+                            logging.info(
+                                "RETRY_SKIPPED source=%s hash=%s reason=claim-not-available",
+                                cfg.name, h,
+                            )
+                            continue
+                    else:
+                        db.update_pending_media(h, media)
+                    submit_add(current_grab, media, resolved_link)
+                    continue
 
-            active_after = [
-                row for row in db.pending_rows(source=cfg.name)
-                if row.get("status") == "pending"
-            ]
-            if not active_after:
-                break
-            now = datetime.now(timezone.utc)
-            remaining = []
-            for row in active_after:
-                deadline = pending_deadline(row)
-                if deadline is not None:
-                    remaining.append(max(0.0, (deadline - now).total_seconds()))
-            sleep_for = cfg.verification_poll_interval_sec
-            if remaining:
-                sleep_for = min(sleep_for, max(0.1, min(remaining)))
-            time.sleep(sleep_for)
+                misses = db.record_missing_observation(h, str(exc))
+                logging.warning(
+                    "PENDING_GET_MISSING source=%s hash=%s observations=%d/2 attempts=%d",
+                    cfg.name, h, misses, attempt_count,
+                )
+                if misses >= 2:
+                    state = db.fail_pending(
+                        h,
+                        "TorrServer returned HTTP 404 on two separate timer runs after "
+                        "an earlier add; the hash may have failed to initialize or may "
+                        "have been deliberately removed by the user",
+                        cfg.max_add_attempts,
+                        cfg.retry_backoff_sec,
+                    )
+                    logging.warning(
+                        "PENDING_MISSING_RESOLVED source=%s hash=%s state=%s attempts=%d",
+                        cfg.name, h, state, attempt_count,
+                    )
+                    if state == "failed":
+                        failed += 1
+                continue
+            except Exception as exc:
+                if status == "pending":
+                    db.observe_pending(h, "action-get-failed", str(exc))
+                logging.warning(
+                    "PENDING_GET_FAILED source=%s hash=%s error=%s",
+                    cfg.name, h, exc,
+                )
+                continue
+
+            evidence = verification_evidence(details)
+            if evidence:
+                completed = db.confirm_pending(h)
+                if completed is not None:
+                    imported_hashes.add(h)
+                    added += 1
+                logging.info(
+                    "ADDED source=%s hash=%s verification=%s recovery=action-get",
+                    cfg.name, h, evidence,
+                )
+                continue
+
+            detail_status = torrserver_status(details)
+            problem = file_stats_problem(details)
+            if status == "retry_wait":
+                db.resume_verification(h, cfg.verification_timeout_sec, detail_status)
+            else:
+                db.observe_pending(
+                    h, "action-get-incomplete: " + detail_status + "; " + str(problem),
+                )
+            logging.info(
+                "PENDING_METADATA source=%s hash=%s status=%s file_stats=%s",
+                cfg.name, h, detail_status, problem,
+            )
+
+        # New Arr hashes not already covered by imports/pending state are
+        # atomically claimed before the first TorrServer read. Other Arr instances
+        # therefore skip the hash instead of issuing duplicate get requests.
+        pending_map = {row["hash"]: row for row in db.pending_rows()}
+        for grab in grabs:
+            h = grab.hash.lower()
+            if h in pending_map:
+                continue
+            if not rebuild and h in imported_hashes:
+                continue
+            if not db.claim_pending(
+                grab, cfg.name, {}, cfg.verification_timeout_sec,
+                allow_known=rebuild,
+            ):
+                logging.info(
+                    "GET_SKIPPED source=%s hash=%s reason=shared-pending-or-import-claim",
+                    cfg.name, h,
+                )
+                continue
+
+            try:
+                details = fetch_torrserver_item(cfg, ts, h)
+            except HttpStatusError as exc:
+                if exc.code != 404:
+                    logging.warning(
+                        "TORRSERVER_GET_FAILED source=%s hash=%s http_status=%d error=%s",
+                        cfg.name, h, exc.code, exc,
+                    )
+                    continue
+
+                prepared = prepare_add(grab)
+                if prepared is None:
+                    db.release_unsubmitted_claim(h)
+                    continue
+                media, resolved_link = prepared
+                db.update_pending_media(h, media)
+                submit_add(grab, media, resolved_link)
+                continue
+            except Exception as exc:
+                logging.warning(
+                    "TORRSERVER_GET_FAILED source=%s hash=%s error=%s",
+                    cfg.name, h, exc,
+                )
+                # Keep the atomic claim. The owning instance will retry this
+                # read on its next timer run; no add has been counted or sent.
+                continue
+
+            evidence = verification_evidence(details)
+            if evidence:
+                completed = db.confirm_pending(h)
+                if completed is not None:
+                    imported_hashes.add(h)
+                    added += 1
+                skipped_present += 1
+                logging.info(
+                    "SKIPPED_PRESENT source=%s hash=%s verification=%s recorded=true",
+                    cfg.name, h, evidence,
+                )
+                continue
+
+            media: dict[str, Any] = {}
+            try:
+                media = media_for(grab)
+            except Exception as exc:
+                logging.warning(
+                    "PENDING_METADATA_LOOKUP_FAILED source=%s hash=%s error=%s",
+                    cfg.name, h, exc,
+                )
+            db.update_pending_media(h, media)
+            db.observe_pending(
+                h, "action-get-incomplete: " + torrserver_status(details)
+                + "; " + str(file_stats_problem(details)),
+            )
+            present_incomplete += 1
+            logging.info(
+                "PENDING_EXISTING source=%s hash=%s status=%s "
+                "reason=await-file-stats-on-next-run",
+                cfg.name, h, torrserver_status(details),
+            )
+
+        pending_count = len(db.pending_rows())
+        known_count = sum(1 for grab in grabs if grab.hash in imported_hashes)
+        logging.info(
+            "HASH_SYNC source=%s arr_grabbed=%d import_history_known=%d "
+            "pending=%d submitted=%d added=%d failed=%d skipped_present=%d "
+            "present_incomplete=%d mode=%s",
+            cfg.name, len(grabs), known_count, pending_count, submitted, added,
+            failed, skipped_present, present_incomplete,
+            "rebuild" if rebuild else "normal",
+        )
 
         process_radarr_blocklist(cfg, arr, db)
         process_sonarr_blocklist(cfg, arr, db)
@@ -2680,16 +2817,15 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
         dispatch_notifications(cfg, db)
         pending_count = len(db.pending_rows())
         logging.info(
-            "DONE source=%s candidates=%d submitted=%d added=%d failed=%d pending=%d "
-            "skipped_present=%d present_incomplete=%d skipped_known=%d duration=%.2fs",
-            cfg.name, len(candidates), submitted, added, failed, pending_count,
-            skipped_present, present_incomplete, skipped_known, time.monotonic() - started,
+            "DONE source=%s submitted=%d added=%d failed=%d pending=%d "
+            "skipped_present=%d present_incomplete=%d duration=%.2fs",
+            cfg.name, submitted, added, failed, pending_count,
+            skipped_present, present_incomplete, time.monotonic() - started,
         )
         return 0 if failed == 0 else 1
     finally:
         db.close()
         lock.__exit__(None, None, None)
-
 
 def load_toml(path: str) -> dict[str, Any]:
     try:

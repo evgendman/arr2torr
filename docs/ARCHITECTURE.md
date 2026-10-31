@@ -1,17 +1,19 @@
 # Architecture and state model
 
-This document describes the v1.3.5 code candidate and its state model. MINI-Ubuntu remains on v1.3.4; v1.3.5 is not installed or tagged. The candidate preserves usable-`FileStats` verification and adds independently configured Radarr/Sonarr native blocklisting with separate in-place SQLite state. Radarr has been live-validated, while Sonarr blocklisting still requires CI and host-specific live validation.
+This document describes the **v1.4.0 candidate**. GitHub Actions run #149 passed on Python 3.11/3.12 with 59 tests each, compilation and version check. MINI-Ubuntu remains on the live-validated v1.3.5 runtime; v1.4.0 is not deployed. Comparative CPU/request measurements and live-host validation remain.
 
 ## 1. Source of truth
 
-The importer reads two live lists on every cycle:
+The importer reads the available history in one configured Radarr or Sonarr instance on each timer run. It does not depend on a webhook, an event cursor or a folder watcher. Arr history remains the discovery source for newly grabbed releases.
 
-1. the available history in one configured Radarr or Sonarr instance;
-2. the current torrent list from TorrServer.
+The shared SQLite database records two durable facts:
 
-It does not depend on a webhook, an event cursor or a folder watcher. There is no “last processed history date” used as the sole checkpoint. If systemd stops the importer and starts it later, the next cycle scans the available Arr history and reconstructs the candidate set from the current snapshots.
+- \`imports\`: hashes previously confirmed with usable \`FileStats\`, including hashes deliberately removed by the user after confirmation;
+- \`pending_adds\`: hashes whose existence/readiness is still unresolved, including the number of actual \`add\` submissions and their retry state.
 
-The practical retention boundary is Arr history itself: a Grab that is no longer present in the source history cannot be rediscovered from that source by this importer alone.
+The importer does not maintain or fetch a full inventory of TorrServer. It asks TorrServer only about specific new or unresolved hashes. If Arr history and SQLite contain no work requiring observation, the run makes no TorrServer API request.
+
+The practical retention boundary remains Arr history itself: a Grab no longer present in the source history cannot be newly rediscovered from that source alone.
 
 ## 2. Reading Arr history
 
@@ -27,12 +29,9 @@ For each record, the importer:
 
 1. keeps only eventType == "grabbed" (case-insensitive);
 2. requires a data object;
-3. requires data.torrentInfoHash;
-4. requires data.downloadUrl;
-5. reads the release title, Arr media ID, history ID, download ID, quality object, languages, Custom Formats and Custom Format score into the in-memory Grab record;
-6. normalizes the hash to lowercase and deduplicates the history by hash, keeping the newest record.
-
-A grabbed history record that is not a torrent, has no hash, lacks a download URL or lacks a valid data object is skipped and accounted for in the summary log.
+3. requires data.torrentInfoHash and data.downloadUrl;
+4. reads the release title, Arr media ID, history ID, download ID and selected Arr metadata into the in-memory Grab record;
+5. normalizes the hash to lowercase and deduplicates history by hash, keeping the newest record.
 
 The importer does not search Prowlarr/JacRed for the release again. The selected release is already represented by the history record.
 
@@ -42,44 +41,55 @@ In the tested configuration, the Arr field data.downloadUrl often looks like a l
 
     http://127.0.0.1:9696/<indexer-id>/download?apikey=...&link=...
 
-The download endpoint may return an HTTP redirect to:
+The download endpoint may return an HTTP redirect to a magnet link. The importer follows up to five HTTP redirect hops without treating the credential-bearing URL as the final TorrServer link. Redirect status codes 301, 302, 303, 307 and 308 are supported. If the URL is already a magnet, it is used directly. If a direct HTTP(S) endpoint does not redirect, it is left for TorrServer to consume.
 
-    magnet:?xt=urn:btih:<infohash>&dn=...
+The resolved link is passed to TorrServer but is not saved into the custom metadata payload. In particular, the Prowlarr API key embedded in the original URL is not copied into TorrServer data or SQLite.
 
-The importer follows up to five HTTP redirect hops without treating the credential-bearing URL as the final TorrServer link. Redirect status codes 301, 302, 303, 307 and 308 are supported. If the URL is already a magnet, it is used directly. If a direct HTTP(S) endpoint does not redirect, it is left for TorrServer to consume.
+## 4. Hash-addressed TorrServer access
 
-The resolved magnet is not saved into the custom metadata payload. In particular, the Prowlarr API key embedded in the original URL is not copied into TorrServer's data.
-
-## 4. Reading TorrServer
-
-The importer obtains the current server snapshot using:
+The v1.4.0 candidate does not call \`POST /torrents {"action":"list"}\` in ordinary processing or rebuild mode. Instead it calls:
 
     POST /torrents
     Content-Type: application/json
 
-    {"action":"list"}
+    {"action":"get","hash":"<exact-infohash>"}
 
-It extracts the hash field from the returned items. Hashes are compared case-insensitively after normalization.
+This request is made only for a new Arr hash or a hash that remains pending. Before the first get, the importer atomically claims the hash in the shared SQLite database. A competing Arr instance therefore skips the hash instead of issuing a duplicate get or add. The result has four relevant outcomes:
 
-The source and receiver snapshots are independent: Arr history tells us what was grabbed; the TorrServer list tells us what exists now. The importer does not assume that a former successful add is still present.
+- **Usable FileStats:** record the hash in shared \`imports\` and do not query it again during normal runs.
+- **Object exists but FileStats are incomplete:** create or retain a pending row; do not submit a duplicate add.
+- **HTTP 404 for a new candidate:** after preparation and an atomic SQLite claim, submit one \`action=add\`.
+- **HTTP 404 after a previously accepted add:** do not immediately resend. Record the missing observation; two 404 observations on separate timer runs are required before entering the bounded retry/backoff path.
 
-## 5. Candidate formula
+Network errors and HTTP 5xx responses are unknown observations, not evidence that a torrent is absent. They do not consume the add-attempt counter.
+
+TorrServer MatriX.145 \`action=get\` can invoke its database-backed reload path when a hash exists in the TorrServer database but is not active in memory. Such a response commonly reports \`Torrent in db\` without usable FileStats. The importer treats it as pending and observes it on a later timer run; it does not send a duplicate metadata-activation \`add\`.
+
+## 5. Candidate and pending-state model
 
 Let:
 
-- **A** = unique infohashes with usable Grabbed records in the configured Arr history;
-- **S** = infohashes in the current TorrServer snapshot whose records contain usable `FileStats`;
-- **I** = infohashes in the shared SQLite import-history table.
+- **A** = unique infohashes with usable Grabbed records in the current Arr history;
+- **I** = hashes in the shared SQLite verified-import history;
+- **P** = hashes in the shared SQLite pending table.
 
-Normal mode treats hashes in **S** as already ready and preserves historical entries in **I**:
+In normal mode, a hash in **I** is excluded without querying TorrServer. A hash in **P** is handled only through its existing state and owning Arr instance. New candidates are:
 
-    New candidates = A − S − I
+    New candidates = A − I − P
 
-A hash present in TorrServer but without usable `FileStats` is not treated as ready. If it is not already in successful history, it enters the metadata-observation/recovery path; a live object is inspected using `action=get` instead of blindly adding it again. A `Torrent in db` record may receive one metadata-activation request per verification attempt.
+For each new candidate, the importer first performs an exact-hash \`get\`:
 
-Rebuild mode ignores the historical exclusion **I**, but still distinguishes ready hashes in **S** from present-but-incomplete hashes. It does not truncate or recreate the SQLite database.
+- usable FileStats: record the already-present torrent in \`imports\`;
+- present but incomplete: atomically reserve it in \`pending_adds\` with \`attempt_count = 0\`;
+- 404: prepare media metadata and the resolved link, atomically reserve the hash, then send \`add\`.
 
-This distinction is central to the user-removal policy. If a previously imported torrent is deliberately removed from TorrServer, normal mode sees it in **I** but not **T** and will skip it instead of silently restoring it. A manual rebuild expresses a new decision to repopulate any missing Grabbed items still present in Arr history.
+For pending hashes, later timer runs query only that exact hash. Usable FileStats promote the row to \`imports\`; incomplete objects remain pending; two separate 404 observations after a previous add move the row into retry/backoff or terminal failure according to \`max_add_attempts\`.
+
+Only actual \`action=add\` submissions increment \`attempt_count\`. Atomic claims and read-only \`get\` observations do not consume attempts. Automatic HTTP retries are disabled for \`action=add\`; ambiguous outcomes are reconciled by later hash-addressed reads.
+
+A successful import means a non-empty \`FileStats\` list for the exact expected hash, with positive unique file IDs and unique safe relative paths. HTTP 200, an echoed hash, database membership or a status string alone is never sufficient.
+
+Rebuild mode ignores **I** for that execution but still uses exact-hash \`get\` to avoid duplicating a ready object. It does not truncate or recreate SQLite. A rebuild is the explicit operator-controlled exception to the intentional-removal safeguard.
 
 ## 6. Shared import history and multiple Arr instances
 
@@ -87,22 +97,12 @@ Every systemd instance uses its own configuration and default lock file, but the
 
     /var/lib/torr-arr-importer/state.db
 
-The v1.3.4 candidate records a new successful import only after the exact hash exposes a non-empty `FileStats` list with positive unique file IDs and unique safe relative paths. The same SQLite record includes diagnostic fields such as source instance, Arr history/media IDs, title and available provider IDs.
+The shared database coordinates Radarr/Sonarr 1080p/4K instances. If two instances see the same new hash, both may discover it in their own Arr histories, but only one can atomically claim the shared pending row and submit \`add\`. Other instances see the shared claim and skip duplicate work.
 
-The v1.3.3 `imports` table does not record the verification method. For that reason, the candidate does not automatically reclassify old success rows or resurrect missing hashes; the 32 items affected by the old list-only rule need a separate, cautious reassessment.
+A hash confirmed in \`imports\` is not queried again in ordinary mode, regardless of which Arr instance first observed it. If a user deliberately removes that torrent from TorrServer, normal timer runs do not resurrect it because the verified hash remains in SQLite. Use \`--rebuild\` only when intentionally repopulating a clean/new TorrServer or otherwise overriding this safeguard.
 
-The shared database is not an independent inventory of TorrServer. TorrServer membership is always checked separately. Its purpose is to remember intentional prior imports even after a user removes a torrent from TorrServer.
+The v1.3.3 \`imports\` table did not record the verification method. The candidate does not automatically reclassify old success rows or resurrect missing hashes; the 32 historical rows created under that weaker rule still require separate, cautious reassessment.
 
-Example with Radarr and Sonarr both seeing the same hash:
-
-1. Radarr-1080 imports it.
-2. The hash is now in TorrServer and in SQLite.
-3. Sonarr-1080 scans its history; the hash is already in the TorrServer snapshot and is skipped.
-4. Other instances behave the same way.
-5. If a user later removes the hash from TorrServer, ordinary runs continue to skip it because it remains in shared SQLite history.
-6. If the user intentionally wants to repopulate a clean/new TorrServer, run --rebuild for the relevant Arr instances.
-
-A new hash for another release is a different candidate. Therefore separate releases of the same movie or series can all be added when the user has grabbed them separately.
 
 ## 7. Fetch identity metadata from Arr
 
@@ -163,25 +163,17 @@ target_quality is descriptive configuration data. It represents which Arr lane c
 ## 9. Duplicate, retry and failure behavior
 
 - One newest Arr history row is retained per hash before candidate selection.
-- A hash with usable `FileStats` is considered ready. A hash present without usable `FileStats` is not considered imported just because TorrServer lists it.
-- Present-but-incomplete live objects are inspected with `action=get`; the importer does not blindly send a duplicate add. A `Torrent in db` record may get one metadata-activation request per verification attempt, but never after that attempt's verification deadline.
-- A missing hash may be added or retried. An incomplete live object is re-observed instead; if it disappears and the verification deadline expires, the normal bounded retry policy applies.
-- Permanent HTTP 4xx responses, including 401/403, are not retried.
-- HTTP 408, 429, 5xx and network failures can be retried according to retry_count and retry_delay.
+- Only usable FileStats for the exact hash satisfy the success contract.
+- New and pending hashes are inspected using address-specific action=get; ordinary processing does not retrieve the full TorrServer inventory.
+- Present-but-incomplete and DB-only objects remain pending. MatriX.145 action=get may initiate a database-backed reload; no separate metadata-activation add is sent.
+- A 404 after an earlier add is observed on two separate timer runs before the existing bounded retry/backoff policy is entered.
+- Permanent HTTP 4xx responses, including 401/403, are not retried automatically by the HTTP client.
+- HTTP 408, 429, 5xx and network failures from read-only requests can be retried according to retry_count and retry_delay. The side-effecting TorrServer action=add uses retry_count=0; uncertain results are reconciled by later exact-hash reads.
+- Only actual add submissions increment max_add_attempts. Hash reservations and get observations do not consume attempts.
 - API-like URL query credentials are redacted in logs/exceptions.
-- Each instance has its own process lock, so overlapping runs of that instance do not run concurrently.
-- Successful new/pending imports are recorded in SQLite only after usable `FileStats` is observed for the exact hash.
-- `--dry-run` prints candidate decisions and media identifiers but does not add torrents or record successful imports.
-
-### Radarr blocklist behavior retained in the v1.3.4 candidate (live terminal-path validation pending)
-
-- The opt-out setting radarr_blocklist_enabled defaults to true for Radarr and is ignored by Sonarr.
-- Only pending_adds rows with status = 'failed' and attempt_count >= max_add_attempts are eligible. A row marked failed by a permanent API rejection before reaching the configured count is saved as skipped_attempt_limit and is not blocklisted. Rows in retry_wait and permanent preparation failures before a TorrServer add are excluded.
-- The importer calls POST /api/v3/history/failed/{arr_history_id} so Radarr can execute its native failed-download event path and add the exact history Grab to the blocklist. This is not a direct POST /api/v3/blocklist operation; the public API has no blocklist creation endpoint.
-- The outcome is persisted in `pending_adds.radarr_blocklist_status`, `radarr_blocklist_last_error`, and `radarr_blocklist_verify_misses`. The v1.3.4 candidate additionally adds `metadata_activation_attempt` in-place to bound DB-only metadata activation.
-- On first migration, old rows already marked failed are assigned legacy_skipped. This intentionally prevents updating the code from retrospectively acting on a batch of old failures. Newly terminal rows use the default NULL state and are processed.
-- HTTP/network results that do not establish whether Radarr completed the failed-history action enter verify_pending. Later runs query /api/v3/blocklist/movie?movieId=...; because the public resource does not expose a torrent hash, recovery can only compare the source release title. The importer does not automatically repeat the non-idempotent failed-history POST.
-- The blocklist result is appended to the existing terminal Apprise failure summary, when notifications are enabled; separate blocklist-only alerts are not emitted. The skipped_attempt_limit outcome is explained in the same message.
+- Each instance has its own process lock. The shared SQLite pending claim prevents overlapping Arr instances from adding the same hash concurrently.
+- Successful new/pending imports are recorded in SQLite only after usable FileStats are observed for the exact hash.
+- --dry-run prints candidate decisions and media identifiers but does not call TorrServer or alter import/pending state.
 
 ## 10. Notification state and failure summaries
 

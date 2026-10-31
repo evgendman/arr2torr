@@ -1,5 +1,20 @@
 # Changelog
 
+## torr-arr-importer v1.4.0 — candidate, not deployed
+
+- Replace full TorrServer `action=list` snapshots in ordinary operation with hash-addressed `action=get` checks for new and unresolved torrents. A confirmed hash is recorded in shared SQLite verified-import history, so ordinary runs do not query it again.
+- Skip all TorrServer API requests when the current run has no new eligible hashes and no unresolved pending hashes that need observation. Arr history remains the source of new Grab discovery.
+- Validate the immediate `action=add` response. If it contains usable `FileStats` for the exact hash, confirm the import immediately; otherwise persist a pending attempt and return without waiting for metadata acquisition.
+- Remove the in-process verification polling loop and the 120-second synchronous wait. Unresolved hashes are checked by `action=get` during later systemd timer runs.
+- Separate atomic hash reservation from the add-attempt counter. Claims and read-only `get` requests do not consume `max_add_attempts`; the counter advances only when an actual `action=add` is submitted.
+- Disable automatic HTTP retries for TorrServer `action=add`. Ambiguous add outcomes are reconciled by exact-hash reads on later runs.
+- Require two separate timer-run 404 observations after an earlier accepted add before moving the operation into the bounded retry/backoff path. A 404 on a due retry can authorize the next add; network errors and 5xx responses do not count as absence.
+- Treat DB-only `Torrent in db` responses as incomplete. MatriX.145 `action=get` can trigger a database-backed torrent reload; the importer observes it on later runs instead of sending a duplicate metadata-activation `add`.
+- Preserve the strict success contract: only non-empty, safe `FileStats` for the exact hash can enter successful-import history. Preserve shared SQLite coordination, deliberate-removal protection, rebuild/retry commands, blocklisting, Seerr Watchlist and notifications.
+- Add an in-place `missing_observations` migration to track consecutive 404 observations without deleting or resetting the existing shared state database.
+- Add regression coverage for immediate readiness, deferred verification, empty cycles, exact-hash reads, present/incomplete and DB-only entries, ambiguous 404 handling, retry counters, rebuild and cross-instance claims.
+- **Validation status:** candidate branch only. GitHub Actions run #149 passed on Python 3.11/3.12 with 59 tests each, compilation and version check. Comparative CPU/request measurements and MINI-Ubuntu live validation remain before deployment; no runtime update is implied by this changelog entry.
+
 ## torr-arr-importer v1.3.5 — deployed and live-validated (2026-10-29)
 
 - Add explicit `sonarr_blocklist_enabled = true` to both Sonarr example TOMLs and parse the setting independently of Radarr's existing flag.
