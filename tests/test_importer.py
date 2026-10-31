@@ -183,7 +183,7 @@ class PendingStateTests(unittest.TestCase):
 
 
 class BatchVerificationTests(unittest.TestCase):
-    def get_404(self, torrent_hash):
+    def get_404(self, _cfg, _ts, torrent_hash):
         return importer.HttpStatusError(
             404, "POST", "http://127.0.0.1:8092/torrents", f"not found: {torrent_hash}",
         )
