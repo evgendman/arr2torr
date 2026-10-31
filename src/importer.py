@@ -861,6 +861,7 @@ class StateDB:
                 UPDATE pending_adds
                 SET status = 'pending', deadline_at = ?, last_checked_at = ?,
                     last_status = ?, last_error = NULL, next_retry_at = NULL,
+                    missing_observations = 0,
                     notification_attempted_at = NULL,
                     radarr_blocklist_status = NULL,
                     radarr_blocklist_last_error = NULL,
