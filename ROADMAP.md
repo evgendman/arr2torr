@@ -4,7 +4,7 @@ This document separates the installed torr-arr-importer revision, observed live 
 
 ## v1.4.0 candidate — hash-addressed non-blocking verification
 
-**Status: implementation committed on branch feature/nonblocking-hash-get-v1.4.0; not deployed.** The working tree is based on the approved design below. The installed MINI-Ubuntu runtime remains v1.3.5. CI must pass on Python 3.11 and 3.12, and a separately authorized live-host validation is still required before deployment.
+**Status: implementation and CI complete on branch feature/nonblocking-hash-get-v1.4.0; not deployed.** GitHub Actions [run #149](https://github.com/evgendman/arr2torr/actions/runs/41184043427) passed on Python 3.11 and 3.12 with 59 tests per version, compilation and version check (1.4.0). The installed MINI-Ubuntu runtime remains v1.3.5. Comparative CPU/request measurements and separately authorized live-host validation are still required before deployment.
 
 - Ordinary processing no longer calls the TorrServer full-inventory list endpoint. New hashes are atomically claimed in shared SQLite before exact-hash get requests; unresolved hashes are checked by exact hash.
 - Idle cycles with no new candidates and no pending observations make no TorrServer API requests.
