@@ -61,7 +61,7 @@ With the usual five-minute timer, a successfully grabbed release is normally tra
 - Adds the torrent through TorrServer's /torrents API, including the Arr title, media category and a safe subset of Arr metadata in data.
 - Uses one shared SQLite database across all importer instances for verified imports and restart-safe pending attempts.
 - Requires usable `FileStats` for the exact hash before recording a successful import; an HTTP acknowledgement or status string alone is not success.
-- In the v1.4.0 candidate, checks only the exact hashes requiring work with `action=get`; ordinary runs do not call `action=list`.
+- In the v1.4.0 candidate, atomically claims new hashes in shared SQLite before checking only those exact hashes with `action=get`; ordinary runs do not call `action=list`.
 - Returns immediately after an add acknowledgement without waiting for metadata acquisition. Unresolved hashes remain in the shared SQLite pending state and are checked during later timer runs.
 - Disables automatic HTTP retries for the side-effecting `action=add`; bounded retries are governed by the persistent SQLite state machine.
 - Supports non-mutating --dry-run, deliberate --rebuild, and explicit --retry-failed for exhausted unverified attempts.
