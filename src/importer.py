@@ -28,7 +28,7 @@ from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 DEFAULT_PAGE_SIZE = 1000
 DEFAULT_TIMEOUT = 30
 
@@ -85,7 +85,7 @@ class Config:
     state_db: str
     history_page_size: int = DEFAULT_PAGE_SIZE
     timeout: int = DEFAULT_TIMEOUT
-    user_agent: str = "torr-arr-importer/1.3.5"
+    user_agent: str = "torr-arr-importer/1.4.1"
     log_level: str = "INFO"
     log_file: str = ""
     retry_count: int = 2
@@ -2408,6 +2408,27 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
         grabs_by_hash = {grab.hash.lower(): grab for grab in grabs if grab.hash}
         media_cache: dict[int, dict[str, Any]] = {}
         added = failed = submitted = skipped_present = present_incomplete = 0
+        verification_queue: dict[str, dict[str, Any]] = {}
+
+        def enqueue_verification(
+            torrent_hash: str, grab: Grab | None, attempt_count: int, reason: str,
+        ) -> None:
+            h = torrent_hash.lower()
+            if h in verification_queue:
+                return
+            deadline = time.monotonic() + cfg.verification_timeout_sec
+            verification_queue[h] = {
+                "grab": grab,
+                "attempt_count": max(0, int(attempt_count)),
+                "deadline": deadline,
+                "missing_recorded": False,
+            }
+            logging.info(
+                "VERIFY_QUEUED source=%s hash=%s attempts=%d timeout_sec=%d "
+                "poll_interval_sec=%.1f reason=%s",
+                cfg.name, h, max(0, int(attempt_count)),
+                cfg.verification_timeout_sec, cfg.verification_poll_interval_sec, reason,
+            )
 
         def media_for(grab: Grab, pending: dict[str, Any] | None = None) -> dict[str, Any]:
             media_id = grab.arr_media_id
@@ -2470,7 +2491,8 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                     )
                 return None
 
-        def submit_add(grab: Grab, media: dict[str, Any], resolved_link: str) -> None:
+        def submit_add(grab: Grab, media: dict[str, Any], resolved_link: str) -> int:
+            """Submit one add; return its attempt number when verification remains pending."""
             nonlocal submitted, added, failed
             attempt = db.start_add_attempt(
                 grab.hash, cfg.max_add_attempts, cfg.verification_timeout_sec,
@@ -2480,7 +2502,7 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                     "ADD_SKIPPED source=%s hash=%s reason=attempt-limit-or-claim-lost",
                     cfg.name, grab.hash,
                 )
-                return
+                return 0
             logging.info(
                 "ADD source=%s hash=%s title=%r imdb=%s tmdb=%s attempt=%d",
                 cfg.name, grab.hash, grab.source_title, media.get("imdbId") or "",
@@ -2501,7 +2523,7 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                         "ADDED source=%s hash=%s verification=%s immediate=true",
                         cfg.name, grab.hash, evidence,
                     )
-                    return
+                    return 0
 
                 response_status = str(
                     response.get("stat_string") or response.get("statString") or "accepted"
@@ -2509,9 +2531,10 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                 db.observe_pending(grab.hash, "add-accepted: " + response_status)
                 logging.info(
                     "ADD_ACCEPTED_PENDING source=%s hash=%s stat=%s attempt=%d "
-                    "verification=await-next-run",
+                    "verification=queued-in-run",
                     cfg.name, grab.hash, response_status, attempt,
                 )
+                return attempt
             except HttpStatusError as exc:
                 if 400 <= exc.code < 500 and not is_retryable_http(exc.code):
                     state = db.fail_pending(
@@ -2523,18 +2546,20 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                         "ADD_REJECTED source=%s hash=%s http_status=%d state=%s error=%s",
                         cfg.name, grab.hash, exc.code, state, exc,
                     )
-                else:
-                    db.observe_pending(grab.hash, "add-outcome-uncertain", str(exc))
-                    logging.warning(
-                        "ADD_UNCERTAIN source=%s hash=%s error=%s; reconcile with action=get next run",
-                        cfg.name, grab.hash, exc,
-                    )
+                    return 0
+                db.observe_pending(grab.hash, "add-outcome-uncertain", str(exc))
+                logging.warning(
+                    "ADD_UNCERTAIN source=%s hash=%s error=%s; reconcile in current run",
+                    cfg.name, grab.hash, exc,
+                )
+                return attempt
             except Exception as exc:
                 db.observe_pending(grab.hash, "add-outcome-uncertain", str(exc))
                 logging.warning(
-                    "ADD_UNCERTAIN source=%s hash=%s error=%s; reconcile with action=get next run",
+                    "ADD_UNCERTAIN source=%s hash=%s error=%s; reconcile in current run",
                     cfg.name, grab.hash, exc,
                 )
+                return attempt
 
         if dry_run:
             pending_map = {row["hash"]: row for row in db.pending_rows()}
@@ -2603,6 +2628,7 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
 
         # Reconcile only this instance's unresolved hashes. Every TorrServer
         # observation is addressed to one exact hash; no full inventory is fetched.
+        # Incomplete objects and uncertain reads enter the same in-run verification queue.
         for pending in db.pending_rows(source=cfg.name):
             h = str(pending.get("hash") or "").lower()
             if not h:
@@ -2613,6 +2639,7 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
 
             status = str(pending.get("status") or "")
             current_grab = grabs_by_hash.get(h)
+            attempt_count = int(pending.get("attempt_count") or 0)
             retry_due = (
                 status == "retry_wait"
                 and pending_retry_due(
@@ -2630,13 +2657,13 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                 if exc.code != 404:
                     if status == "pending":
                         db.observe_pending(h, "action-get-failed", str(exc))
+                        enqueue_verification(h, current_grab, attempt_count, "pending-get-error")
                     logging.warning(
                         "PENDING_GET_FAILED source=%s hash=%s http_status=%d error=%s",
                         cfg.name, h, exc.code, exc,
                     )
                     continue
 
-                attempt_count = int(pending.get("attempt_count") or 0)
                 if attempt_count == 0 or retry_due:
                     if current_grab is None:
                         logging.warning(
@@ -2661,7 +2688,9 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                             continue
                     else:
                         db.update_pending_media(h, media)
-                    submit_add(current_grab, media, resolved_link)
+                    attempt = submit_add(current_grab, media, resolved_link)
+                    if attempt:
+                        enqueue_verification(h, current_grab, attempt, "pending-retry-add")
                     continue
 
                 misses = db.record_missing_observation(h, str(exc))
@@ -2672,7 +2701,7 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                 if misses >= 2:
                     state = db.fail_pending(
                         h,
-                        "TorrServer returned HTTP 404 on two separate timer runs after "
+                        "TorrServer returned HTTP 404 on two separate importer runs after "
                         "an earlier add; the hash may have failed to initialize or may "
                         "have been deliberately removed by the user",
                         cfg.max_add_attempts,
@@ -2688,6 +2717,7 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
             except Exception as exc:
                 if status == "pending":
                     db.observe_pending(h, "action-get-failed", str(exc))
+                    enqueue_verification(h, current_grab, attempt_count, "pending-get-error")
                 logging.warning(
                     "PENDING_GET_FAILED source=%s hash=%s error=%s",
                     cfg.name, h, exc,
@@ -2714,14 +2744,16 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                 db.observe_pending(
                     h, "action-get-incomplete: " + detail_status + "; " + str(problem),
                 )
+            enqueue_verification(h, current_grab, attempt_count, "pending-incomplete")
             logging.info(
-                "PENDING_METADATA source=%s hash=%s status=%s file_stats=%s",
+                "PENDING_METADATA source=%s hash=%s status=%s file_stats=%s "
+                "verification=queued-in-run",
                 cfg.name, h, detail_status, problem,
             )
 
         # New Arr hashes not already covered by imports/pending state are
         # atomically claimed before the first TorrServer read. Other Arr instances
-        # therefore skip the hash instead of issuing duplicate get requests.
+        # therefore skip the hash instead of issuing duplicate work.
         pending_map = {row["hash"]: row for row in db.pending_rows()}
         for grab in grabs:
             h = grab.hash.lower()
@@ -2747,6 +2779,7 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                         "TORRSERVER_GET_FAILED source=%s hash=%s http_status=%d error=%s",
                         cfg.name, h, exc.code, exc,
                     )
+                    enqueue_verification(h, grab, 0, "new-candidate-get-error")
                     continue
 
                 prepared = prepare_add(grab)
@@ -2755,15 +2788,18 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                     continue
                 media, resolved_link = prepared
                 db.update_pending_media(h, media)
-                submit_add(grab, media, resolved_link)
+                attempt = submit_add(grab, media, resolved_link)
+                if attempt:
+                    enqueue_verification(h, grab, attempt, "new-candidate-add")
                 continue
             except Exception as exc:
                 logging.warning(
                     "TORRSERVER_GET_FAILED source=%s hash=%s error=%s",
                     cfg.name, h, exc,
                 )
-                # Keep the atomic claim. The owning instance will retry this
-                # read on its next timer run; no add has been counted or sent.
+                # Keep the atomic claim; retry this read in the current run's
+                # shared verification queue without consuming an add attempt.
+                enqueue_verification(h, grab, 0, "new-candidate-get-error")
                 continue
 
             evidence = verification_evidence(details)
@@ -2793,10 +2829,163 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                 + "; " + str(file_stats_problem(details)),
             )
             present_incomplete += 1
+            enqueue_verification(h, grab, 0, "new-candidate-incomplete")
             logging.info(
                 "PENDING_EXISTING source=%s hash=%s status=%s "
-                "reason=await-file-stats-on-next-run",
+                "reason=await-file-stats-in-current-run",
                 cfg.name, h, torrserver_status(details),
+            )
+
+        # One shared carousel polls every unresolved candidate. A ready hash is
+        # removed immediately; every hash keeps its own 120-second deadline.
+        def expire_verification(h: str, entry: dict[str, Any]) -> None:
+            verification_queue.pop(h, None)
+            db.observe_pending(h, "verification-timeout-deferred")
+            logging.warning(
+                "PENDING_WAIT_TIMEOUT source=%s hash=%s timeout_sec=%d "
+                "attempts=%d state=pending next_check=next-run",
+                cfg.name, h, cfg.verification_timeout_sec, entry["attempt_count"],
+            )
+
+        if verification_queue:
+            logging.info(
+                "VERIFY_QUEUE_START source=%s candidates=%d poll_interval_sec=%.1f "
+                "timeout_sec=%d",
+                cfg.name, len(verification_queue), cfg.verification_poll_interval_sec,
+                cfg.verification_timeout_sec,
+            )
+
+        while verification_queue:
+            now = time.monotonic()
+            for h, entry in list(verification_queue.items()):
+                if now >= entry["deadline"]:
+                    expire_verification(h, entry)
+            if not verification_queue:
+                break
+
+            nearest_deadline = min(
+                float(entry["deadline"]) for entry in verification_queue.values()
+            )
+            sleep_for = min(
+                cfg.verification_poll_interval_sec,
+                max(0.0, nearest_deadline - time.monotonic()),
+            )
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+
+            # A full sweep is one carousel round. Requests are sequential and
+            # hash-specific; no get result is inferred from another hash.
+            for h in list(verification_queue):
+                entry = verification_queue.get(h)
+                if entry is None:
+                    continue
+                if time.monotonic() >= entry["deadline"]:
+                    expire_verification(h, entry)
+                    continue
+
+                try:
+                    details = fetch_torrserver_item(cfg, ts, h)
+                except HttpStatusError as exc:
+                    if exc.code != 404:
+                        db.observe_pending(h, "action-get-failed", str(exc))
+                        logging.warning(
+                            "VERIFY_GET_FAILED source=%s hash=%s http_status=%d error=%s",
+                            cfg.name, h, exc.code, exc,
+                        )
+                        continue
+
+                    attempt_count = int(entry["attempt_count"])
+                    current_grab = entry["grab"]
+                    if attempt_count == 0:
+                        if current_grab is None:
+                            logging.warning(
+                                "VERIFY_GET_MISSING_NO_ARR_RECORD source=%s hash=%s "
+                                "attempts=0; cannot submit add without current downloadUrl",
+                                cfg.name, h,
+                            )
+                            verification_queue.pop(h, None)
+                            continue
+                        prepared = prepare_add(current_grab)
+                        if prepared is None:
+                            verification_queue.pop(h, None)
+                            continue
+                        media, resolved_link = prepared
+                        db.update_pending_media(h, media)
+                        attempt = submit_add(current_grab, media, resolved_link)
+                        if attempt:
+                            entry["attempt_count"] = attempt
+                            logging.info(
+                                "VERIFY_QUEUE_ADD source=%s hash=%s attempt=%d",
+                                cfg.name, h, attempt,
+                            )
+                        else:
+                            verification_queue.pop(h, None)
+                        continue
+
+                    if not entry["missing_recorded"]:
+                        misses = db.record_missing_observation(h, str(exc))
+                        entry["missing_recorded"] = True
+                        logging.warning(
+                            "PENDING_GET_MISSING source=%s hash=%s observations=%d/2 "
+                            "attempts=%d observation=within-run",
+                            cfg.name, h, misses, attempt_count,
+                        )
+                        if misses >= 2:
+                            state = db.fail_pending(
+                                h,
+                                "TorrServer returned HTTP 404 on separate importer runs "
+                                "after an earlier add; the hash may have failed to "
+                                "initialize or may have been deliberately removed",
+                                cfg.max_add_attempts,
+                                cfg.retry_backoff_sec,
+                            )
+                            logging.warning(
+                                "PENDING_MISSING_RESOLVED source=%s hash=%s state=%s attempts=%d",
+                                cfg.name, h, state, attempt_count,
+                            )
+                            if state == "failed":
+                                failed += 1
+                    # Do not count additional 404s from this same execution as
+                    # separate observations; the next timer run may re-check it.
+                    verification_queue.pop(h, None)
+                    continue
+                except Exception as exc:
+                    db.observe_pending(h, "action-get-failed", str(exc))
+                    logging.warning(
+                        "VERIFY_GET_FAILED source=%s hash=%s error=%s",
+                        cfg.name, h, exc,
+                    )
+                    continue
+
+                evidence = verification_evidence(details)
+                if evidence:
+                    completed = db.confirm_pending(h)
+                    if completed is not None:
+                        imported_hashes.add(h)
+                        added += 1
+                    logging.info(
+                        "ADDED source=%s hash=%s verification=%s recovery=action-get-in-run",
+                        cfg.name, h, evidence,
+                    )
+                    verification_queue.pop(h, None)
+                    continue
+
+                detail_status = torrserver_status(details)
+                problem = file_stats_problem(details)
+                db.observe_pending(
+                    h, "action-get-incomplete: " + detail_status + "; " + str(problem),
+                )
+                logging.info(
+                    "PENDING_METADATA source=%s hash=%s status=%s file_stats=%s",
+                    cfg.name, h, detail_status, problem,
+                )
+                if time.monotonic() >= entry["deadline"]:
+                    expire_verification(h, entry)
+
+        if verification_queue:
+            logging.warning(
+                "VERIFY_QUEUE_REMAINS source=%s count=%d",
+                cfg.name, len(verification_queue),
             )
 
         pending_count = len(db.pending_rows())

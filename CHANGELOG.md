@@ -1,5 +1,14 @@
 # Changelog
 
+## torr-arr-importer v1.4.1 — candidate, not deployed
+
+- Restore in-run verification after the initial candidate pass, using one shared carousel of exact-hash TorrServer `action=get` requests for all unresolved candidates.
+- Poll at the configured `verification_poll_interval_sec`; each candidate has its own `verification_timeout_sec` deadline (default 120 seconds), measured from queue entry. Successfully verified hashes leave the queue immediately.
+- Keep candidates pending when their individual wait expires. A timeout ends only the current run's wait and does not increment `attempt_count`, trigger blocklisting or add a separate metadata-failure counter.
+- Count only actual `action=add` submissions against `max_add_attempts`. Repeated in-run 404s are not treated as separate timer-run observations; the existing two-run missing-hash safeguard remains.
+- Retain exact-hash reads, the shared SQLite state machine, atomic claims, no-full-inventory behavior and add-request retry protection.
+- **Validation status:** candidate branch only; CI and comparative/live validation pending. MINI-Ubuntu remains on deployed v1.3.5.
+
 ## torr-arr-importer v1.4.0 — candidate, not deployed
 
 - Replace full TorrServer `action=list` snapshots in ordinary operation with hash-addressed `action=get` checks for new and unresolved torrents. A confirmed hash is recorded in shared SQLite verified-import history, so ordinary runs do not query it again.

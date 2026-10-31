@@ -1,28 +1,32 @@
 # Operations and troubleshooting
 
-## Understand one v1.4.0 candidate cycle
+## Understand one v1.4.1 candidate cycle
 
 A normal cycle performs:
 
 1. START — selected instance, Arr type, category and target lane.
 2. HISTORY — fetch and deduplicate the configured Arr history.
 3. Read the shared SQLite import and pending state.
-4. For each unresolved pending hash owned by this instance, query only that hash using TorrServer \`action=get\`.
-5. For each new eligible Arr hash, query only that hash. If it is absent, prepare metadata, atomically claim it and submit one \`action=add\`.
-6. Inspect the immediate add response. If it contains usable FileStats for the exact hash, log ADDED and record success. Otherwise log ADD_ACCEPTED_PENDING and finish the run; verification resumes on the next timer invocation.
-7. DONE — candidates, submitted/added/failed counts, pending count and elapsed time.
+4. For each unresolved pending hash owned by this instance, query only that exact hash with TorrServer `action=get`.
+5. For each new eligible Arr hash, query only that exact hash. If it is absent, prepare metadata, atomically claim it and submit one `action=add`.
+6. Inspect every immediate add response. A usable FileStats structure confirms success; otherwise the candidate joins the shared in-run verification queue.
+7. After the initial pass across pending and new candidates, poll all unresolved hashes in one carousel using exact-hash `action=get` at the configured `verification_poll_interval_sec`.
+8. Remove a hash from the queue immediately when valid FileStats appear. Each hash has its own `verification_timeout_sec` deadline (default 120 seconds); a timed-out hash remains pending for the next timer run.
+9. DONE — submitted/added/failed counts, pending count, and elapsed time.
 
-There is no full TorrServer inventory request and no in-process verification sleep. An idle run with no new candidates and no pending hashes requiring observation makes **zero TorrServer API requests**.
+There is no full TorrServer inventory request. Verification is not a separate 120-second serial wait per candidate: one shared queue sweeps all unresolved hashes. An idle run with no new candidates and no pending hashes requiring observation makes **zero TorrServer API requests**.
 
 Useful log events:
 
-- \`SKIPPED_PRESENT\`: an exact-hash get returned usable FileStats; the hash was recorded in shared verified history.
-- \`PENDING_EXISTING\`: get found an object without usable FileStats; it will be checked on later runs.
-- \`ADD_ACCEPTED_PENDING\`: TorrServer acknowledged add but immediate FileStats were not ready.
-- \`PENDING_METADATA\`: a later get found the object but FileStats remain incomplete.
-- \`PENDING_GET_MISSING\`: exact-hash get returned 404 after an earlier add; the log includes the consecutive observation count.
-- \`ADDED ... recovery=action-get\`: a later timer run found usable FileStats and promoted the pending row.
-- \`ADD_UNCERTAIN\`: add result was ambiguous; a future get will reconcile it.
+- `SKIPPED_PRESENT`: an exact-hash get returned usable FileStats; the hash was recorded in shared verified history.
+- `PENDING_EXISTING`: get found an object without usable FileStats; it entered the current run's queue.
+- `ADD_ACCEPTED_PENDING`: TorrServer acknowledged add but immediate FileStats were not ready; the hash entered the queue.
+- `VERIFY_QUEUED`: a candidate entered the shared carousel with its own timeout.
+- `PENDING_METADATA`: an action=get returned the object but its FileStats remain incomplete.
+- `PENDING_WAIT_TIMEOUT`: this hash's individual wait expired; it remains pending for the next timer run.
+- `PENDING_GET_MISSING`: exact-hash get returned 404 after a prior add. At most one such observation is counted in one importer execution; two separate runs are required before retry/backoff.
+- `ADDED ... recovery=action-get-in-run`: a later carousel read found usable FileStats and promoted the pending row.
+- `ADD_UNCERTAIN`: add result was ambiguous; the same run's carousel attempts read-only reconciliation.
 
 Example commands:
 
@@ -49,21 +53,23 @@ Two distinct safeguards follow:
 
 A newly encountered hash that already exists in TorrServer with usable FileStats is recorded in I as an observed, ready item. Its FileStats are validated before that record is made.
 
-## Non-blocking verification and retry behavior
+## In-run verification and retry behavior
 
-TorrServer may return an add acknowledgement before metadata acquisition completes. The importer checks the immediate response, but it does not wait. A hash without usable FileStats remains pending and is checked through exact-hash \`action=get\` on later timer runs.
+TorrServer may return an add acknowledgement before metadata acquisition completes. The importer checks the immediate response, then queues any unresolved hash. Once the initial pass is complete, one shared carousel polls each queued hash through exact-hash `action=get` at the configured interval.
 
-A present but incomplete object is never blindly re-added. In particular, \`Torrent in db\` is not success. On MatriX.145, the get handler can initiate the DB-backed reload into memory; subsequent timer runs observe the result.
+Every hash receives an independent `verification_timeout_sec` deadline (default 120 seconds) beginning when it enters the queue. A successful hash is removed immediately. When a deadline expires, only that hash's current wait ends: the row stays pending for the next timer run. The timeout does not increment the add-attempt count, trigger blocklisting or create a separate metadata-failure counter.
+
+A present but incomplete object is never blindly re-added. In particular, `Torrent in db` is not success. On MatriX.145, the get handler can initiate the DB-backed reload into memory; the same run's later carousel reads observe the result.
 
 If a previously accepted add later returns HTTP 404:
 
 1. The first 404 is recorded but does not trigger an immediate add.
-2. A second 404 on a separate timer run moves the unresolved attempt into the existing bounded retry/backoff policy (or terminal failure when attempts are exhausted).
+2. A second 404 on a separate importer run moves the unresolved attempt into the existing bounded retry/backoff policy (or terminal failure when attempts are exhausted).
 3. A due retry performs another exact-hash get. Only if it is still absent and a current Arr Grab/download URL is available can another add be submitted.
 
-This conservative grace/recheck behavior reduces accidental re-adds when a user removes a torrent before its first verification run. It cannot perfectly distinguish deliberate removal from a failed metadata initialization; that ambiguity is inherent in polling without an explicit user-removal signal.
+Repeated 404 responses during one in-run carousel count at most once. This reduces accidental re-adds when a user removes a torrent before its first verification run. It cannot perfectly distinguish deliberate removal from a failed metadata initialization; that ambiguity is inherent in polling without an explicit user-removal signal.
 
-Only actual add submissions consume \`max_add_attempts\`. Hash reservations, get calls, present-but-incomplete objects, network errors and 5xx responses do not. Automatic HTTP retries are disabled for the side-effecting add call; read-only requests retain their configured retry behavior.
+Only actual add submissions consume `max_add_attempts`. Hash reservations, get calls, present-but-incomplete objects, network errors, 5xx responses and an individual verification timeout do not. Automatic HTTP retries are disabled for the side-effecting add call; read-only requests retain their configured retry behavior.
 
 ## When to use --rebuild
 

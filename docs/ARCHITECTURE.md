@@ -1,6 +1,6 @@
 # Architecture and state model
 
-This document describes the **v1.4.0 candidate**. GitHub Actions run #149 passed on Python 3.11/3.12 with 59 tests each, compilation and version check. MINI-Ubuntu remains on the live-validated v1.3.5 runtime; v1.4.0 is not deployed. Comparative CPU/request measurements and live-host validation remain.
+This document describes the **v1.4.1 candidate** on branch `feature/in-run-get-verification-v1.4.1`. The candidate is not deployed; MINI-Ubuntu remains on the live-validated v1.3.5 runtime. CI, comparative CPU/request measurements and live-host validation are pending.
 
 ## 1. Source of truth
 
@@ -8,8 +8,8 @@ The importer reads the available history in one configured Radarr or Sonarr inst
 
 The shared SQLite database records two durable facts:
 
-- \`imports\`: hashes previously confirmed with usable \`FileStats\`, including hashes deliberately removed by the user after confirmation;
-- \`pending_adds\`: hashes whose existence/readiness is still unresolved, including the number of actual \`add\` submissions and their retry state.
+- `imports`: hashes previously confirmed with usable `FileStats`, including hashes deliberately removed by the user after confirmation;
+- `pending_adds`: hashes whose existence/readiness is still unresolved, including the number of actual `add` submissions and their retry state.
 
 The importer does not maintain or fetch a full inventory of TorrServer. It asks TorrServer only about specific new or unresolved hashes. If Arr history and SQLite contain no work requiring observation, the run makes no TorrServer API request.
 
@@ -47,23 +47,27 @@ The resolved link is passed to TorrServer but is not saved into the custom metad
 
 ## 4. Hash-addressed TorrServer access
 
-The v1.4.0 candidate does not call \`POST /torrents {"action":"list"}\` in ordinary processing or rebuild mode. Instead it calls:
+The v1.4.1 candidate does not call `POST /torrents {"action":"list"}` in ordinary processing or rebuild mode. Instead it calls:
 
     POST /torrents
     Content-Type: application/json
 
     {"action":"get","hash":"<exact-infohash>"}
 
-This request is made only for a new Arr hash or a hash that remains pending. Before the first get, the importer atomically claims the hash in the shared SQLite database. A competing Arr instance therefore skips the hash instead of issuing a duplicate get or add. The result has four relevant outcomes:
+This request is made only for a new Arr hash or a hash that remains pending. Before the first get, the importer atomically claims the hash in the shared SQLite database. A competing Arr instance therefore skips the hash instead of issuing a duplicate get or add.
 
-- **Usable FileStats:** record the hash in shared \`imports\` and do not query it again during normal runs.
-- **Object exists but FileStats are incomplete:** create or retain a pending row; do not submit a duplicate add.
-- **HTTP 404 for a new candidate:** after preparation and an atomic SQLite claim, submit one \`action=add\`.
-- **HTTP 404 after a previously accepted add:** do not immediately resend. Record the missing observation; two 404 observations on separate timer runs are required before entering the bounded retry/backoff path.
+The first pass checks all unresolved pending hashes and eligible new candidates. Any hash that remains incomplete or uncertain enters one shared in-run verification carousel. The carousel sweeps the waiting hashes using exact-hash `action=get` at the configured interval; it does not repeatedly fetch the full TorrServer inventory.
+
+Relevant outcomes:
+
+- **Usable FileStats:** record the hash in shared `imports` and remove it from the queue immediately.
+- **Object exists but FileStats are incomplete:** retain a pending row and continue polling; do not submit a duplicate add.
+- **HTTP 404 for a new candidate:** prepare media/link data, atomically claim the hash, then submit one `action=add`.
+- **HTTP 404 after a previously accepted add:** do not immediately resend. Count at most one missing observation per importer execution; two observations on separate runs are required before the bounded retry/backoff path.
 
 Network errors and HTTP 5xx responses are unknown observations, not evidence that a torrent is absent. They do not consume the add-attempt counter.
 
-TorrServer MatriX.145 \`action=get\` can invoke its database-backed reload path when a hash exists in the TorrServer database but is not active in memory. Such a response commonly reports \`Torrent in db\` without usable FileStats. The importer treats it as pending and observes it on a later timer run; it does not send a duplicate metadata-activation \`add\`.
+TorrServer MatriX.145 `action=get` can invoke its database-backed reload path when a hash exists in the TorrServer database but is not active in memory. Such a response commonly reports `Torrent in db` without usable FileStats. The same run's subsequent carousel reads observe the reload; the importer does not send a duplicate metadata-activation `add`.
 
 ## 5. Candidate and pending-state model
 
@@ -77,19 +81,18 @@ In normal mode, a hash in **I** is excluded without querying TorrServer. A hash 
 
     New candidates = A − I − P
 
-For each new candidate, the importer first performs an exact-hash \`get\`:
+For every unresolved hash, the current run performs repeated exact-hash `get` observations in one shared carousel. A candidate enters the queue when its first read is incomplete/uncertain or after an accepted add does not immediately contain FileStats. Its own `verification_timeout_sec` deadline (default 120 seconds) begins at queue entry.
 
-- usable FileStats: record the already-present torrent in \`imports\`;
-- present but incomplete: atomically reserve it in \`pending_adds\` with \`attempt_count = 0\`;
-- 404: prepare media metadata and the resolved link, atomically reserve the hash, then send \`add\`.
+- Usable FileStats promote the row to `imports` and remove it from the queue immediately.
+- An incomplete object stays pending and is checked on the next carousel sweep.
+- An individual timeout ends only the current run's wait for that hash. The row remains pending for the next timer run; timeout does not increment `attempt_count`, create a metadata-failure counter or trigger terminal blocklisting.
+- Two 404 observations from separate importer runs after a previous accepted add move the row into retry/backoff or terminal failure according to `max_add_attempts`.
 
-For pending hashes, later timer runs query only that exact hash. Usable FileStats promote the row to \`imports\`; incomplete objects remain pending; two separate 404 observations after a previous add move the row into retry/backoff or terminal failure according to \`max_add_attempts\`.
+Only actual `action=add` submissions increment `attempt_count`. Atomic claims and read-only `get` observations do not consume attempts. Automatic HTTP retries are disabled for `action=add`; ambiguous outcomes are reconciled by later hash-addressed reads.
 
-Only actual \`action=add\` submissions increment \`attempt_count\`. Atomic claims and read-only \`get\` observations do not consume attempts. Automatic HTTP retries are disabled for \`action=add\`; ambiguous outcomes are reconciled by later hash-addressed reads.
+A successful import means a non-empty `FileStats` list for the exact expected hash, with positive unique file IDs and unique safe relative paths. HTTP 200, an echoed hash, database membership or a status string alone is never sufficient.
 
-A successful import means a non-empty \`FileStats\` list for the exact expected hash, with positive unique file IDs and unique safe relative paths. HTTP 200, an echoed hash, database membership or a status string alone is never sufficient.
-
-Rebuild mode ignores **I** for that execution but still uses exact-hash \`get\` to avoid duplicating a ready object. It does not truncate or recreate SQLite. A rebuild is the explicit operator-controlled exception to the intentional-removal safeguard.
+Rebuild mode ignores **I** for that execution but still uses exact-hash `get` to avoid duplicating a ready object. It does not truncate or recreate SQLite. A rebuild is the explicit operator-controlled exception to the intentional-removal safeguard.
 
 ## 6. Shared import history and multiple Arr instances
 
