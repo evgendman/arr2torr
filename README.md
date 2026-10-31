@@ -4,7 +4,7 @@
 
 arr2torr is the project and documentation home for **torr-arr-importer**, a polling service that transfers releases selected with **Grab** in Radarr or Sonarr directly to the TorrServer API. It is intended for a media workflow where the user wants to start streaming from TorrServer, then expose those streams to a media library through STRM files or another integration.
 
-**Last live-validated importer behavior on MINI-Ubuntu: v1.3.5 (2026-10-29).** On 2026-10-31, v1.4.0 candidate code was placed at `/opt/torr-arr-importer/importer.py`, but both importer timers were left stopped and the candidate was not run against the production SQLite database. v1.4.1 is available for review in draft [PR #6](https://github.com/evgendman/arr2torr/pull/6). CI run [#156](https://github.com/evgendman/arr2torr/actions/runs/41210258165) passed on Python 3.11/3.12/3.14 with 61 tests each; comparative measurements and separately authorized live-host validation remain.
+**torr-arr-importer v1.4.1 is installed and manually live-validated on MINI-Ubuntu (2026-10-31).** The installed file matches candidate source blob `c9943d92a396882765a92e01cb40d28aa7388777`; production SQLite was migrated in place after a verified backup, and both Radarr and Sonarr manual runs completed successfully. GitHub Actions [run #157](https://github.com/evgendman/arr2torr/actions/runs/41210488097) passed on Python 3.11, 3.12 and 3.14 with 61 tests each. Draft [PR #6](https://github.com/evgendman/arr2torr/pull/6) remains unreleased; controlled CPU/request-count measurements remain. Timer activation is tracked separately and must be confirmed from systemd state.
 
 ## Why this exists
 
@@ -207,7 +207,7 @@ The current stored data subset includes source instance name, media type, target
 - [Roadmap and validation status](ROADMAP.md)
 - [Version history](CHANGELOG.md)
 
-The last live-validated behavior is **torr-arr-importer v1.3.5**. The `/opt/torr-arr-importer/importer.py` path on MINI-Ubuntu currently contains v1.4.0 candidate code, but both timers are stopped and that code has not been run against production SQLite. The v1.4.1 candidate is in draft [PR #6](https://github.com/evgendman/arr2torr/pull/6). GitHub Actions run [#156](https://github.com/evgendman/arr2torr/actions/runs/41210258165) passed on Python 3.11/3.12/3.14 (61 tests each); comparative measurements and separately authorized live-host validation remain. The service uses Python 3.11+ and the standard library.
+The current MINI-Ubuntu runtime is **torr-arr-importer v1.4.1**, installed at `/opt/torr-arr-importer/importer.py` with Git blob SHA `c9943d92a396882765a92e01cb40d28aa7388777`. The production SQLite schema migration and manual Radarr/Sonarr runs passed; final `PRAGMA integrity_check` returned `ok`, with 729 verified imports and 22 retained terminal pending rows. See the [production validation report](docs/VALIDATION-v1.4.1-MINI-Ubuntu-2026-10-31.md) and [draft PR #6](https://github.com/evgendman/arr2torr/pull/6). The PR remains unreleased. Controlled CPU/request-count measurements remain; timer activation is not asserted until confirmed from systemd state. The service uses Python 3.11+ and the standard library.
 
 ## Related project: STRM/NFO library generation
 
@@ -215,7 +215,7 @@ The last live-validated behavior is **torr-arr-importer v1.3.5**. The `/opt/torr
 
 ## Current status
 
-The last live-validated behavior on MINI-Ubuntu is **torr-arr-importer v1.3.5**. v1.4.0 candidate code is now on disk in `/opt/torr-arr-importer/importer.py`, but both timers remain stopped and it has not run against production SQLite. v1.4.1 is available for review in [draft PR #6](https://github.com/evgendman/arr2torr/pull/6). CI is green across Python 3.11, 3.12 and 3.14; comparative request/CPU measurements and separate live-host validation remain. See [Roadmap](ROADMAP.md) for the recorded source identity and validation history.
+The current MINI-Ubuntu runtime is **torr-arr-importer v1.4.1** and its source identity, SQLite migration, manual production run results and final database checks are recorded in the [v1.4.1 validation report](docs/VALIDATION-v1.4.1-MINI-Ubuntu-2026-10-31.md). Draft [PR #6](https://github.com/evgendman/arr2torr/pull/6) remains open and unreleased. Both 1080p manual runs passed; automated timer activation must be confirmed separately. Representative CPU/request-count measurements and a v1.3.5 executable A/B comparison remain outstanding.
 
 Live logs on 2026-10-29 confirmed 20 fresh/replacement additions reaching `ADDED verification=usable-file-stats`. For Radarr, seven terminally failed release choices reached the native failed-history action and logged `RADARR_BLOCKLIST_BLOCKED`; three grouped critical Apprise notifications were acknowledged with HTTP 200, and five replacements were verified. For Sonarr, five failed release choices logged `SONARR_BLOCKLIST_BLOCKED`; replacement additions for Outer Banks S01, Outer Banks S03 and Dark S03 were verified. No alternative additions for Love, Death & Robots S02/S03 were observed in the reviewed log window, but the native blocklist actions themselves are confirmed. The blocklist implementation/validation milestone is complete for both applications; replacement availability remains dependent on each app's own settings and available releases.
 
