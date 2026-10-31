@@ -455,6 +455,42 @@ class BatchVerificationTests(unittest.TestCase):
             self.assertEqual(db.pending_rows()[0]["status"], "pending")
             db.close()
 
+    def test_new_candidate_is_claimed_before_the_first_get(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab()
+
+            def inspect_claim_before_get(_cfg, _ts, torrent_hash):
+                db = importer.StateDB(cfg.state_db)
+                try:
+                    rows = db.pending_rows(cfg.name)
+                    self.assertEqual(len(rows), 1)
+                    self.assertEqual(rows[0]["hash"], torrent_hash)
+                    self.assertEqual(rows[0]["status"], "pending")
+                    self.assertEqual(rows[0]["attempt_count"], 0)
+                finally:
+                    db.close()
+                raise self.get_404(_cfg, _ts, torrent_hash)
+
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(
+                    importer, "fetch_torrserver_item", side_effect=inspect_claim_before_get,
+                ),
+                mock.patch.object(importer, "fetch_media", return_value={"tmdbId": 123}),
+                mock.patch.object(
+                    importer, "add_to_torrserver",
+                    return_value={"hash": HASH1, "stat_string": "Torrent added"},
+                ) as add_mock,
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 0)
+            add_mock.assert_called_once()
+            db = importer.StateDB(cfg.state_db)
+            self.assertEqual(db.pending_rows()[0]["attempt_count"], 1)
+            db.close()
+
     def test_transient_get_error_does_not_create_add_attempt_or_send_add(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = make_config(Path(tmp))
@@ -474,7 +510,10 @@ class BatchVerificationTests(unittest.TestCase):
             media_mock.assert_not_called()
             add_mock.assert_not_called()
             db = importer.StateDB(cfg.state_db)
-            self.assertEqual(db.pending_rows(), [])
+            self.assertEqual(len(db.pending_rows()), 1)
+            self.assertEqual(db.pending_rows()[0]["status"], "pending")
+            self.assertEqual(db.pending_rows()[0]["attempt_count"], 0)
+            self.assertEqual(db.pending_rows()[0]["last_status"], "candidate-claimed")
             db.close()
 
     def test_rebuild_can_readd_known_hash_but_normal_mode_never_queries_it(self):
