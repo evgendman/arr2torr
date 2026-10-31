@@ -7,7 +7,7 @@
 - Keep candidates pending when their individual wait expires. A timeout ends only the current run's wait and does not increment `attempt_count`, trigger blocklisting or add a separate metadata-failure counter.
 - Count only actual `action=add` submissions against `max_add_attempts`. Repeated in-run 404s are not treated as separate timer-run observations; the existing two-run missing-hash safeguard remains.
 - Retain exact-hash reads, the shared SQLite state machine, atomic claims, no-full-inventory behavior and add-request retry protection.
-- **Validation:** GitHub Actions [run #153](https://github.com/evgendman/arr2torr/actions/runs/41209023839) passed on Python 3.11 and 3.12 with 61 tests per version, compilation and version check. Comparative request/CPU measurements and separately authorized live-host validation remain. MINI-Ubuntu remains on deployed v1.3.5.
+- **Validation:** GitHub Actions [run #154](https://github.com/evgendman/arr2torr/actions/runs/41209108991) passed on Python 3.11 and 3.12 with 61 tests per version, compilation and version check. Comparative request/CPU measurements and separately authorized live-host validation remain. MINI-Ubuntu remains on deployed v1.3.5.
 
 ## torr-arr-importer v1.4.0 — candidate, not deployed
 

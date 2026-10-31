@@ -4,7 +4,7 @@
 
 arr2torr is the project and documentation home for **torr-arr-importer**, a polling service that transfers releases selected with **Grab** in Radarr or Sonarr directly to the TorrServer API. It is intended for a media workflow where the user wants to start streaming from TorrServer, then expose those streams to a media library through STRM files or another integration.
 
-**Installed on MINI-Ubuntu: torr-arr-importer v1.3.5 (live-validated 2026-10-29).** A separate **v1.4.1 candidate** is being prepared on branch `feature/in-run-get-verification-v1.4.1`; it is not deployed. It retains exact-hash `action=get` and uses one shared in-run verification carousel with an independent 120-second default deadline for each unresolved hash. See [Roadmap](ROADMAP.md) for implementation and validation status.
+**Installed on MINI-Ubuntu: torr-arr-importer v1.3.5 (live-validated 2026-10-29).** A separate **v1.4.1 candidate** is available in draft [PR #6](https://github.com/evgendman/arr2torr/pull/6) on `feature/in-run-get-verification-v1.4.1`; it is not deployed. CI run [#154](https://github.com/evgendman/arr2torr/actions/runs/41209108991) passed on Python 3.11/3.12 with 61 tests each. Comparative measurements and separate live-host validation remain. See [Roadmap](ROADMAP.md) for status.
 
 ## Why this exists
 
@@ -81,7 +81,7 @@ A present but incomplete object is never blindly re-added. In TorrServer MatriX.
 
 Only actual `action=add` submissions consume `max_add_attempts`. Hash reservations, get calls, present-but-incomplete objects and verification timeouts do not. Automatic HTTP retries are disabled for the side-effecting `add` request.
 
-Only usable, non-empty `FileStats` for the exact hash can create a successful-import record. Entries must have positive unique file IDs and unique safe relative paths. Confirmed hashes are not queried again during ordinary runs, preserving the safeguard against resurrecting torrents deliberately removed by the user. `--rebuild` remains the explicit operator-controlled exception. The v1.4.1 candidate is not deployed; MINI-Ubuntu remains on v1.3.5 pending CI, comparative measurements and separately authorized live validation.
+Only usable, non-empty `FileStats` for the exact hash can create a successful-import record. Entries must have positive unique file IDs and unique safe relative paths. Confirmed hashes are not queried again during ordinary runs, preserving the safeguard against resurrecting torrents deliberately removed by the user. `--rebuild` remains the explicit operator-controlled exception. The v1.4.1 candidate is not deployed; CI is green, while comparative measurements and separately authorized live validation remain. MINI-Ubuntu remains on v1.3.5.
 
 ## Final-failure Apprise notifications (introduced in v1.3.2; retained in v1.3.5)
 
@@ -207,7 +207,7 @@ The current stored data subset includes source instance name, media type, target
 - [Roadmap and validation status](ROADMAP.md)
 - [Version history](CHANGELOG.md)
 
-The installed and live-validated runtime remains **torr-arr-importer v1.3.5**. The v1.4.1 candidate is in draft [PR #6](https://github.com/evgendman/arr2torr/pull/6) on `feature/in-run-get-verification-v1.4.1`. GitHub Actions run [#153](https://github.com/evgendman/arr2torr/actions/runs/41209023839) passed on Python 3.11/3.12 (61 tests each); comparative measurements and separately authorized MINI-Ubuntu validation remain before deployment. The service uses Python 3.11+ and the standard library; it does not require external Python packages.
+The installed and live-validated runtime remains **torr-arr-importer v1.3.5**. The v1.4.1 candidate is in draft [PR #6](https://github.com/evgendman/arr2torr/pull/6) on `feature/in-run-get-verification-v1.4.1`. GitHub Actions run [#154](https://github.com/evgendman/arr2torr/actions/runs/41209108991) passed on Python 3.11/3.12 (61 tests each); comparative measurements and separately authorized MINI-Ubuntu validation remain before deployment. The service uses Python 3.11+ and the standard library; it does not require external Python packages.
 
 ## Related project: STRM/NFO library generation
 

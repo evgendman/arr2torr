@@ -1,6 +1,6 @@
 # Architecture and state model
 
-This document describes the **v1.4.1 candidate** on branch `feature/in-run-get-verification-v1.4.1`. GitHub Actions run [#153](https://github.com/evgendman/arr2torr/actions/runs/41209023839) passed on Python 3.11 and 3.12 with 61 tests per version, compilation and version check. The candidate is not deployed; MINI-Ubuntu remains on the live-validated v1.3.5 runtime. Comparative CPU/request measurements and live-host validation remain.
+This document describes the **v1.4.1 candidate** on branch `feature/in-run-get-verification-v1.4.1`. GitHub Actions run [#154](https://github.com/evgendman/arr2torr/actions/runs/41209108991) passed on Python 3.11 and 3.12 with 61 tests per version, compilation and version check. The candidate is not deployed; MINI-Ubuntu remains on the live-validated v1.3.5 runtime. Comparative CPU/request measurements and live-host validation remain.
 
 ## 1. Source of truth
 

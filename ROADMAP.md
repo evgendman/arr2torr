@@ -4,7 +4,7 @@ This document separates the installed torr-arr-importer revision, observed live 
 
 ## v1.4.1 candidate — shared in-run FileStats verification queue
 
-**Status: implementation prepared on branch `feature/in-run-get-verification-v1.4.1`; CI and comparative validation are pending.** MINI-Ubuntu remains on the live-validated v1.3.5 runtime. This candidate supersedes the incomplete v1.4.0 draft; it is not deployed or released.
+**Status: implementation committed on branch `feature/in-run-get-verification-v1.4.1`; GitHub Actions run [#154](https://github.com/evgendman/arr2torr/actions/runs/41209108991) passed on Python 3.11 and 3.12 with 61 tests per version, compilation and version check.** Comparative request/CPU measurements and separately authorized live-host validation remain. MINI-Ubuntu stays on v1.3.5; the candidate is not deployed or released.
 
 - Keeps hash-addressed `action=get` and removes full TorrServer inventory polling from ordinary and rebuild processing.
 - Performs the initial exact-hash check and submits eligible adds for all candidates before entering one shared verification carousel.
@@ -15,7 +15,7 @@ This document separates the installed torr-arr-importer revision, observed live 
 - Preserves the two-distinct-run 404 safeguard after an accepted add. Repeated 404 responses inside one carousel are counted at most once in that importer execution.
 - Keeps the shared SQLite state, atomic cross-instance claims, deliberate-removal protection, retry/backoff, Radarr/Sonarr blocklisting, Seerr Watchlist and notification paths.
 
-**Validation remaining:** comparative request/CPU checks and separately authorized live-host validation on MINI-Ubuntu. CI is green in [run #153](https://github.com/evgendman/arr2torr/actions/runs/41209023839). Do not install the candidate merely because CI passed.
+**Validation remaining:** comparative request/CPU checks and separately authorized live-host validation on MINI-Ubuntu. CI is green in [run #154](https://github.com/evgendman/arr2torr/actions/runs/41209108991). Do not install the candidate merely because CI passed.
 
 ## v1.4.0 superseded draft — non-blocking verification
 
@@ -55,7 +55,7 @@ The earlier v1.4.0 draft on `feature/nonblocking-hash-get-v1.4.0` passed its ori
 
 ## v1.4.1 acceptance contract: hash-addressed in-run verification
 
-**Status: implementation committed to the v1.4.1 candidate branch; GitHub Actions run [#153](https://github.com/evgendman/arr2torr/actions/runs/41209023839) passed on Python 3.11 and 3.12 with 61 tests per version, compilation and version check.** Comparative request/CPU measurements and separately authorized live-host validation remain. MINI-Ubuntu remains on v1.3.5.
+**Status: implementation committed to the v1.4.1 candidate branch; GitHub Actions run [#154](https://github.com/evgendman/arr2torr/actions/runs/41209108991) passed on Python 3.11 and 3.12 with 61 tests per version, compilation and version check.** Comparative request/CPU measurements and separately authorized live-host validation remain. MINI-Ubuntu remains on v1.3.5.
 
 ### Goals and agreed design
 
@@ -105,7 +105,7 @@ The earlier v1.4.0 draft on `feature/nonblocking-hash-get-v1.4.0` passed its ori
 - [x] Keep the successful-import rule strict: only usable `FileStats` for the exact hash may create an `imports` record. Keep intentionally removed, previously confirmed hashes protected in normal mode.
 - [x] Ensure `max_add_attempts` counts only actual `add` requests; read-only `get` checks do not consume attempts.
 - [x] Preserve `--rebuild`, `--retry-failed`, terminal blocklisting, Seerr Watchlist, Apprise notifications and in-place SQLite migration semantics.
-- [x] Add regression tests for immediate-ready add responses, shared multi-hash polling, immediate queue removal on success, independent per-hash timeout, pending preservation after timeout, exact-hash get, DB-only reactivation, absent hashes, in-run 404 exclusion from the two-run safeguard, ambiguous 404 across separate runs, transient read failures, deliberate user removal, rebuild and cross-instance concurrent claims. CI execution remains pending.
+- [x] Add regression tests for immediate-ready add responses, shared multi-hash polling, immediate queue removal on success, independent per-hash timeout, pending preservation after timeout, exact-hash get, DB-only reactivation, absent hashes, in-run 404 exclusion from the two-run safeguard, ambiguous 404 across separate runs, transient read failures, deliberate user removal, rebuild and cross-instance concurrent claims. GitHub Actions run #154 passed on Python 3.11 and 3.12 with 61 tests per version.
 - [ ] Compare before/after request counts and CPU usage on MINI-Ubuntu with an idle library, one pending hash, a small batch and a larger library. Verify that full-library FileStats generation is eliminated from importer polling and that the four Arr profiles do not create duplicate work.
 - [ ] Validate on MINI-Ubuntu before declaring the change complete. Do not reset or delete the shared SQLite database during deployment or testing.
 
