@@ -6,7 +6,7 @@ Pull request: [#6 — draft](https://github.com/evgendman/arr2torr/pull/6)
 
 ## Result
 
-v1.4.1 was installed on MINI-Ubuntu and both production profiles completed a manual normal run successfully. The production SQLite database passed integrity checks before and after the in-place schema migration and after both profile runs. The PR remains a draft; no tag or GitHub Release was created.
+v1.4.1 was installed on MINI-Ubuntu and both production profiles completed a manual normal run successfully. The production SQLite database passed integrity checks before and after the in-place schema migration and after both profile runs. After manual validation, both 1080p systemd timers were re-enabled and confirmed `enabled` and `active (waiting)` at 2026-10-31 22:04:09 +05:00. The PR remains a draft; no tag or GitHub Release was created.
 
 ## Installed source identity and backup
 
@@ -81,7 +81,7 @@ After both manual runs:
 
 The terminal failure records were preserved. The pre-run read-only status audit showed previously completed native blocklist, Seerr Watchlist and notification outcomes; the manual runs did not generate new Seerr requests or failures.
 
-Both importer services and both 1080p timers were observed inactive after the manual runs; no importer process remained. The operator was separately given the following command to enable and start only the 1080p timers:
+Immediately after the manual runs, both importer services and both 1080p timers were observed inactive; no importer process remained. The operator then enabled and started only the two 1080p timers. Systemd subsequently confirmed both timers:
 
 ```bash
 sudo systemctl enable --now \
@@ -89,7 +89,7 @@ sudo systemctl enable --now \
   torr-arr-importer@sonarr-1080.timer
 ```
 
-Timer activation is not claimed as complete in this record until `systemctl status` / `systemctl list-timers` confirms both timers active and scheduled. The 4K timers were not touched.
+Both timers were `enabled` and `active (waiting)`; their reported next trigger was 2026-10-31 22:09:09 +05:00. `systemctl list-timers 'torr-arr-importer@*' --all` listed exactly two timers, Radarr 1080p and Sonarr 1080p. The 4K timers were not touched.
 
 ## Remaining work and publication state
 
