@@ -54,7 +54,7 @@ The v1.4.0 candidate does not call \`POST /torrents {"action":"list"}\` in ordin
 
     {"action":"get","hash":"<exact-infohash>"}
 
-This request is made only for a new Arr hash or a hash that remains pending. The result has four relevant outcomes:
+This request is made only for a new Arr hash or a hash that remains pending. Before the first get, the importer atomically claims the hash in the shared SQLite database. A competing Arr instance therefore skips the hash instead of issuing a duplicate get or add. The result has four relevant outcomes:
 
 - **Usable FileStats:** record the hash in shared \`imports\` and do not query it again during normal runs.
 - **Object exists but FileStats are incomplete:** create or retain a pending row; do not submit a duplicate add.
