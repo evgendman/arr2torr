@@ -1,16 +1,28 @@
 # Operations and troubleshooting
 
-## Understand one cycle
+## Understand one v1.4.0 candidate cycle
 
-A normal cycle logs a concise summary of each stage:
+A normal cycle performs:
 
 1. START — selected instance, Arr type, category and target lane.
-2. HISTORY — full history records, Grabbed records, unique hashes, duplicates and skipped invalid records.
-3. A TorrServer list snapshot is read.
-4. SNAPSHOT — number of distinct Arr grabs, hashes currently on TorrServer, hashes already known to the shared import history and new candidates.
-5. For each candidate, Arr media/series details are fetched as needed, then an add is sent to TorrServer.
-6. ADD_ACCEPTED logs TorrServer's initial acknowledgement; ADDED is logged only after the exact hash exposes usable FileStats. A listed-but-incomplete hash is inspected with action=get, not blindly re-added.
-7. DONE records candidates, added/failed counts, ready hashes skipped as present, incomplete hashes, previously imported hashes, elapsed time and dry-run mode where applicable.
+2. HISTORY — fetch and deduplicate the configured Arr history.
+3. Read the shared SQLite import and pending state.
+4. For each unresolved pending hash owned by this instance, query only that hash using TorrServer \`action=get\`.
+5. For each new eligible Arr hash, query only that hash. If it is absent, prepare metadata, atomically claim it and submit one \`action=add\`.
+6. Inspect the immediate add response. If it contains usable FileStats for the exact hash, log ADDED and record success. Otherwise log ADD_ACCEPTED_PENDING and finish the run; verification resumes on the next timer invocation.
+7. DONE — candidates, submitted/added/failed counts, pending count and elapsed time.
+
+There is no full TorrServer inventory request and no in-process verification sleep. An idle run with no new candidates and no pending hashes requiring observation makes **zero TorrServer API requests**.
+
+Useful log events:
+
+- \`SKIPPED_PRESENT\`: an exact-hash get returned usable FileStats; the hash was recorded in shared verified history.
+- \`PENDING_EXISTING\`: get found an object without usable FileStats; it will be checked on later runs.
+- \`ADD_ACCEPTED_PENDING\`: TorrServer acknowledged add but immediate FileStats were not ready.
+- \`PENDING_METADATA\`: a later get found the object but FileStats remain incomplete.
+- \`PENDING_GET_MISSING\`: exact-hash get returned 404 after an earlier add; the log includes the consecutive observation count.
+- \`ADDED ... recovery=action-get\`: a later timer run found usable FileStats and promoted the pending row.
+- \`ADD_UNCERTAIN\`: add result was ambiguous; a future get will reconcile it.
 
 Example commands:
 
@@ -20,32 +32,44 @@ Example commands:
 
 If the timer is enabled, use systemctl list-timers 'torr-arr-importer@*' to check the next schedule.
 
-## The three-set model
+## State model and deliberate-removal protection
 
-On a regular run, the importer compares:
+The candidate does not compare complete Arr and TorrServer inventories. It uses:
 
-- what Arr still reports as Grabbed (A);
-- what exists in TorrServer right now (T);
-- what the shared SQLite database remembers as previously imported (I).
+- **A** — unique Grabbed hashes in the configured Arr history;
+- **I** — hashes in the shared SQLite verified-import history;
+- **P** — hashes in the shared SQLite pending table.
 
-The normal candidate set is:
+Normal mode excludes **I** without calling TorrServer. It observes only relevant rows in **P** and new hashes in **A − I − P**. If there is no relevant pending work and no new candidate, no TorrServer request is sent.
 
-    A − T − I
+Two distinct safeguards follow:
 
-This provides two distinct protections:
+- **Cross-instance duplicate protection:** every instance shares the same pending claim and verified-import state. Only one instance can own an unresolved hash and send its add request.
+- **Deliberate-removal protection:** once usable FileStats have confirmed a hash and it is in I, normal runs do not query TorrServer for it. Removing it from TorrServer therefore does not cause an automatic resurrection.
 
-- **TorrServer duplicate protection:** a hash already present in the receiving server is skipped, regardless of which Arr instance originally added it.
-- **Deliberate-removal protection:** a hash once successfully imported, then removed from TorrServer by the user, remains in the shared SQLite history. Normal runs do not resurrect it.
+A newly encountered hash that already exists in TorrServer with usable FileStats is recorded in I as an observed, ready item. Its FileStats are validated before that record is made.
 
-This is intentional behavior, not a lost synchronization event.
+## Non-blocking verification and retry behavior
+
+TorrServer may return an add acknowledgement before metadata acquisition completes. The importer checks the immediate response, but it does not wait. A hash without usable FileStats remains pending and is checked through exact-hash \`action=get\` on later timer runs.
+
+A present but incomplete object is never blindly re-added. In particular, \`Torrent in db\` is not success. On MatriX.145, the get handler can initiate the DB-backed reload into memory; subsequent timer runs observe the result.
+
+If a previously accepted add later returns HTTP 404:
+
+1. The first 404 is recorded but does not trigger an immediate add.
+2. A second 404 on a separate timer run moves the unresolved attempt into the existing bounded retry/backoff policy (or terminal failure when attempts are exhausted).
+3. A due retry performs another exact-hash get. Only if it is still absent and a current Arr Grab/download URL is available can another add be submitted.
+
+This conservative grace/recheck behavior reduces accidental re-adds when a user removes a torrent before its first verification run. It cannot perfectly distinguish deliberate removal from a failed metadata initialization; that ambiguity is inherent in polling without an explicit user-removal signal.
+
+Only actual add submissions consume \`max_add_attempts\`. Hash reservations, get calls, present-but-incomplete objects, network errors and 5xx responses do not. Automatic HTTP retries are disabled for the side-effecting add call; read-only requests retain their configured retry behavior.
 
 ## When to use --rebuild
 
---rebuild is an explicit recovery/repopulation mode. It ignores the historical exclusion set I for that execution, but still skips hashes currently present in TorrServer:
+\`--rebuild\` is an explicit recovery/repopulation mode. It ignores the successful-import exclusion **I** for that execution, but still queries only the exact Arr hashes being reconsidered. A ready object with usable FileStats is skipped; an absent object may be re-added after an exact-hash 404 and a successful atomic claim.
 
-    Rebuild candidates = A − T
-
-Use it when switching to a clean/new TorrServer database, or when you intentionally want to restore all source-history releases that are currently missing from TorrServer.
+Use rebuild when switching to a clean/new TorrServer database, or when you intentionally want to restore source-history releases that were previously confirmed but are now missing. No full TorrServer list is fetched.
 
 Example:
 
@@ -54,15 +78,16 @@ Example:
       --config /etc/torr-arr-importer/radarr-1080.toml --rebuild
     sudo systemctl start torr-arr-importer@radarr-1080.timer
 
-Run rebuild for each relevant Arr instance if you want to repopulate the new TorrServer from all of their histories. Since all instances share SQLite state and each rebuild still checks current TorrServer membership, hashes added by the first instance will be seen by later instances and skipped.
+Run rebuild for each relevant Arr instance. Because the instances share SQLite claims and import history, later instances skip hashes already claimed or confirmed by an earlier instance.
 
-**The database does not need to be deleted for rebuild.** Do not remove the shared state file just to refill a clean TorrServer. Clearing it erases intentional-removal memory for every instance.
+**The database does not need to be deleted for rebuild.** Do not remove the shared state file; clearing it erases intentional-removal memory for every instance.
 
 ## Why multiple releases of one movie/series are retained
 
 Arr often focuses on the final chosen download in a conventional workflow. However, users can manually Grab different releases over time. Each unique infohash is treated as its own torrent. The importer deduplicates repeated history rows for the same hash, not distinct hashes for the same title.
 
-That means different versions of one movie or series can coexist in TorrServer. The downstream library can expose each one as a distinct root with its own source identity and allow the viewer to choose.
+That means different versions of one movie or series can all be retained when grabbed separately.
+
 
 ## Radarr/Sonarr blocklisting after terminal TorrServer failure
 
