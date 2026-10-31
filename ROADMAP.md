@@ -6,7 +6,7 @@ This document separates the installed torr-arr-importer revision, observed live 
 
 **Status: implementation committed on branch feature/nonblocking-hash-get-v1.4.0; not deployed.** The working tree is based on the approved design below. The installed MINI-Ubuntu runtime remains v1.3.5. CI must pass on Python 3.11 and 3.12, and a separately authorized live-host validation is still required before deployment.
 
-- Ordinary processing no longer calls the TorrServer full-inventory list endpoint. New and unresolved hashes are checked with exact-hash get requests.
+- Ordinary processing no longer calls the TorrServer full-inventory list endpoint. New hashes are atomically claimed in shared SQLite before exact-hash get requests; unresolved hashes are checked by exact hash.
 - Idle cycles with no new candidates and no pending observations make no TorrServer API requests.
 - The immediate add response is checked for usable FileStats. If absent, the attempt remains pending and the process exits without a polling loop or 120-second wait; later timer runs reconcile by exact-hash get.
 - Automatic HTTP retries are disabled for the side-effecting add request. SQLite reservations are separate from actual add attempts; only a real add submission increments max_add_attempts.
