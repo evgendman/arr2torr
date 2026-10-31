@@ -163,25 +163,17 @@ target_quality is descriptive configuration data. It represents which Arr lane c
 ## 9. Duplicate, retry and failure behavior
 
 - One newest Arr history row is retained per hash before candidate selection.
-- A hash with usable `FileStats` is considered ready. A hash present without usable `FileStats` is not considered imported just because TorrServer lists it.
-- Present-but-incomplete live objects are inspected with `action=get`; the importer does not blindly send a duplicate add. A `Torrent in db` record may get one metadata-activation request per verification attempt, but never after that attempt's verification deadline.
-- A missing hash may be added or retried. An incomplete live object is re-observed instead; if it disappears and the verification deadline expires, the normal bounded retry policy applies.
-- Permanent HTTP 4xx responses, including 401/403, are not retried.
-- HTTP 408, 429, 5xx and network failures can be retried according to retry_count and retry_delay.
+- Only usable FileStats for the exact hash satisfy the success contract.
+- New and pending hashes are inspected using address-specific action=get; ordinary processing does not retrieve the full TorrServer inventory.
+- Present-but-incomplete and DB-only objects remain pending. MatriX.145 action=get may initiate a database-backed reload; no separate metadata-activation add is sent.
+- A 404 after an earlier add is observed on two separate timer runs before the existing bounded retry/backoff policy is entered.
+- Permanent HTTP 4xx responses, including 401/403, are not retried automatically by the HTTP client.
+- HTTP 408, 429, 5xx and network failures from read-only requests can be retried according to retry_count and retry_delay. The side-effecting TorrServer action=add uses retry_count=0; uncertain results are reconciled by later exact-hash reads.
+- Only actual add submissions increment max_add_attempts. Hash reservations and get observations do not consume attempts.
 - API-like URL query credentials are redacted in logs/exceptions.
-- Each instance has its own process lock, so overlapping runs of that instance do not run concurrently.
-- Successful new/pending imports are recorded in SQLite only after usable `FileStats` is observed for the exact hash.
-- `--dry-run` prints candidate decisions and media identifiers but does not add torrents or record successful imports.
-
-### Radarr blocklist behavior retained in the v1.3.4 candidate (live terminal-path validation pending)
-
-- The opt-out setting radarr_blocklist_enabled defaults to true for Radarr and is ignored by Sonarr.
-- Only pending_adds rows with status = 'failed' and attempt_count >= max_add_attempts are eligible. A row marked failed by a permanent API rejection before reaching the configured count is saved as skipped_attempt_limit and is not blocklisted. Rows in retry_wait and permanent preparation failures before a TorrServer add are excluded.
-- The importer calls POST /api/v3/history/failed/{arr_history_id} so Radarr can execute its native failed-download event path and add the exact history Grab to the blocklist. This is not a direct POST /api/v3/blocklist operation; the public API has no blocklist creation endpoint.
-- The outcome is persisted in `pending_adds.radarr_blocklist_status`, `radarr_blocklist_last_error`, and `radarr_blocklist_verify_misses`. The v1.3.4 candidate additionally adds `metadata_activation_attempt` in-place to bound DB-only metadata activation.
-- On first migration, old rows already marked failed are assigned legacy_skipped. This intentionally prevents updating the code from retrospectively acting on a batch of old failures. Newly terminal rows use the default NULL state and are processed.
-- HTTP/network results that do not establish whether Radarr completed the failed-history action enter verify_pending. Later runs query /api/v3/blocklist/movie?movieId=...; because the public resource does not expose a torrent hash, recovery can only compare the source release title. The importer does not automatically repeat the non-idempotent failed-history POST.
-- The blocklist result is appended to the existing terminal Apprise failure summary, when notifications are enabled; separate blocklist-only alerts are not emitted. The skipped_attempt_limit outcome is explained in the same message.
+- Each instance has its own process lock. The shared SQLite pending claim prevents overlapping Arr instances from adding the same hash concurrently.
+- Successful new/pending imports are recorded in SQLite only after usable FileStats are observed for the exact hash.
+- --dry-run prints candidate decisions and media identifiers but does not call TorrServer or alter import/pending state.
 
 ## 10. Notification state and failure summaries
 
