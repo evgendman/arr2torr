@@ -647,6 +647,173 @@ class StateDB:
             self.conn.rollback()
             raise
 
+    def claim_pending(
+        self,
+        grab: Grab,
+        source: str,
+        media: dict[str, Any],
+        verification_timeout_sec: int,
+        *,
+        allow_known: bool = False,
+    ) -> bool:
+        """Atomically reserve a hash without counting an add attempt.
+
+        A claim is used before an add or while tracking a live but incomplete
+        object. Only start_add_attempt() increments the add-attempt counter.
+        """
+        now_dt = datetime.now(timezone.utc)
+        now_text = now_dt.isoformat()
+        deadline_text = (now_dt + timedelta(seconds=verification_timeout_sec)).isoformat()
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            if not allow_known and self.conn.execute(
+                "SELECT 1 FROM imports WHERE hash = ?", (grab.hash,)
+            ).fetchone():
+                self.conn.commit()
+                return False
+
+            existing = self.conn.execute(
+                "SELECT source, status, next_retry_at FROM pending_adds WHERE hash = ?",
+                (grab.hash,),
+            ).fetchone()
+            if existing:
+                if str(existing["source"] or "") != source:
+                    self.conn.commit()
+                    return False
+                status = str(existing["status"] or "")
+                if status in {"pending", "failed"}:
+                    self.conn.commit()
+                    return False
+                if status != "retry_wait":
+                    self.conn.commit()
+                    return False
+                due = parse_iso_datetime(existing["next_retry_at"])
+                if due is None or due > now_dt:
+                    self.conn.commit()
+                    return False
+                cur = self.conn.execute(
+                    """
+                    UPDATE pending_adds
+                    SET arr_history_id=?, arr_media_id=?, download_id=?, title=?,
+                        media_title=COALESCE(?, media_title),
+                        title_slug=COALESCE(?, title_slug),
+                        imdb_id=COALESCE(?, imdb_id),
+                        tmdb_id=COALESCE(?, tmdb_id),
+                        tvdb_id=COALESCE(?, tvdb_id),
+                        status='pending', requested_at=?, deadline_at=?,
+                        next_retry_at=NULL, last_checked_at=NULL,
+                        last_status='retry-due-claim', last_error=NULL,
+                        missing_observations=0
+                    WHERE hash=? AND source=? AND status='retry_wait'
+                    """,
+                    (
+                        grab.history_id, grab.arr_media_id,
+                        str(grab.data.get("downloadId") or grab.download_id or "") or None,
+                        grab.source_title,
+                        str(media.get("title") or "") or None,
+                        str(media.get("titleSlug") or "") or None,
+                        str(media.get("imdbId") or "") or None,
+                        str(media.get("tmdbId") or "") or None,
+                        str(media.get("tvdbId") or "") or None,
+                        now_text, deadline_text, grab.hash, source,
+                    ),
+                )
+                self.conn.commit()
+                return cur.rowcount == 1
+
+            self.conn.execute(
+                """
+                INSERT INTO pending_adds
+                  (hash, source, arr_history_id, arr_media_id, download_id, title,
+                   media_title, title_slug, imdb_id, tmdb_id, tvdb_id, requested_at,
+                   deadline_at, attempt_count, status, last_checked_at, last_status,
+                   last_error, next_retry_at, missing_observations)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending',
+                        NULL, 'candidate-claimed', NULL, NULL, 0)
+                """,
+                (
+                    grab.hash, source, grab.history_id, grab.arr_media_id,
+                    str(grab.data.get("downloadId") or grab.download_id or "") or None,
+                    grab.source_title,
+                    str(media.get("title") or "") or None,
+                    str(media.get("titleSlug") or "") or None,
+                    str(media.get("imdbId") or "") or None,
+                    str(media.get("tmdbId") or "") or None,
+                    str(media.get("tvdbId") or "") or None,
+                    now_text, deadline_text,
+                ),
+            )
+            self.conn.commit()
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def start_add_attempt(
+        self, torrent_hash: str, max_attempts: int, verification_timeout_sec: int,
+    ) -> int:
+        """Count an actual add submission, never a read-only get or reservation."""
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat()
+        deadline_text = (now + timedelta(seconds=verification_timeout_sec)).isoformat()
+        with self.conn:
+            cur = self.conn.execute(
+                """
+                UPDATE pending_adds
+                SET attempt_count=attempt_count+1, requested_at=?, deadline_at=?,
+                    last_checked_at=NULL, last_status='add-request-started',
+                    last_error=NULL, next_retry_at=NULL, missing_observations=0
+                WHERE hash=? AND status='pending' AND attempt_count < ?
+                """,
+                (now_text, deadline_text, torrent_hash, max_attempts),
+            )
+            if cur.rowcount != 1:
+                return 0
+            row = self.conn.execute(
+                "SELECT attempt_count FROM pending_adds WHERE hash=?", (torrent_hash,)
+            ).fetchone()
+            return int(row["attempt_count"])
+
+    def record_missing_observation(self, torrent_hash: str, reason: str) -> int:
+        """Record one consecutive 404 observation for an already-pending hash."""
+        with self.conn:
+            self.conn.execute(
+                """
+                UPDATE pending_adds
+                SET missing_observations=missing_observations+1,
+                    last_checked_at=?, last_status='action-get-404', last_error=?
+                WHERE hash=? AND status='pending'
+                """,
+                (iso_now(), reason[:1000], torrent_hash),
+            )
+            row = self.conn.execute(
+                "SELECT missing_observations FROM pending_adds WHERE hash=?",
+                (torrent_hash,),
+            ).fetchone()
+        return int(row["missing_observations"]) if row else 0
+
+    def update_pending_media(self, torrent_hash: str, media: dict[str, Any]) -> None:
+        with self.conn:
+            self.conn.execute(
+                """
+                UPDATE pending_adds
+                SET media_title=COALESCE(?, media_title),
+                    title_slug=COALESCE(?, title_slug),
+                    imdb_id=COALESCE(?, imdb_id),
+                    tmdb_id=COALESCE(?, tmdb_id),
+                    tvdb_id=COALESCE(?, tvdb_id)
+                WHERE hash=?
+                """,
+                (
+                    str(media.get("title") or "") or None,
+                    str(media.get("titleSlug") or "") or None,
+                    str(media.get("imdbId") or "") or None,
+                    str(media.get("tmdbId") or "") or None,
+                    str(media.get("tvdbId") or "") or None,
+                    torrent_hash,
+                ),
+            )
+
     def metadata_activation_attempt(self, torrent_hash: str) -> int | None:
         row = self.conn.execute(
             "SELECT metadata_activation_attempt FROM pending_adds WHERE hash = ?",
