@@ -13,7 +13,7 @@
 - Preserve the strict success contract: only non-empty, safe `FileStats` for the exact hash can enter successful-import history. Preserve shared SQLite coordination, deliberate-removal protection, rebuild/retry commands, blocklisting, Seerr Watchlist and notifications.
 - Add an in-place `missing_observations` migration to track consecutive 404 observations without deleting or resetting the existing shared state database.
 - Add regression coverage for immediate readiness, deferred verification, empty cycles, exact-hash reads, present/incomplete and DB-only entries, ambiguous 404 handling, retry counters, rebuild and cross-instance claims.
-- **Validation status:** candidate branch only. CI and MINI-Ubuntu live validation are required before deployment; no runtime update is implied by this changelog entry.
+- **Validation status:** candidate branch only. GitHub Actions run #149 passed on Python 3.11/3.12 with 59 tests each, compilation and version check. Comparative CPU/request measurements and MINI-Ubuntu live validation remain before deployment; no runtime update is implied by this changelog entry.
 
 ## torr-arr-importer v1.3.5 — deployed and live-validated (2026-10-29)
 
