@@ -35,7 +35,7 @@ This document separates the installed torr-arr-importer revision, observed live 
 - Production traces: `/tmp/torr-arr-importer-v1.4.1-radarr-live-20261031-215942.log` and `/tmp/torr-arr-importer-v1.4.1-sonarr-live-20261031-220128.log`.
 - **Outstanding:** controlled CPU/request-count measurements for idle, pending, small-batch and larger-library cases; and a v1.3.5 executable A/B comparison. This functional validation does not prove downstream torr2strm/Jellyfin ingestion or playback.
 
-## MINI-Ubuntu isolated smoke test and preliminary API sample (2026-10-31)
+## Pre-install MINI-Ubuntu isolated smoke test and preliminary API sample (2026-10-31)
 
 **Result: candidate behavior passed in an isolated, read-only test; production deployment was not performed.**
 
@@ -48,9 +48,9 @@ This document separates the installed torr-arr-importer revision, observed live 
 - A separate one-request read-only sample against the same TorrServer measured: exact-hash GET = 1,494 response bytes / 0.197 s; full `action=list` = 531,442 response bytes / 0.219 s. The list response was about 356 times larger in this sample, while single-request latency was similar. This is a preliminary response-size comparison, not a representative repeated-load or CPU benchmark.
 - TorrServer RSS increased by about 131 MiB across the combined GET+LIST observation window. Since the GET also activated a DB-only torrent and no isolated before/after RSS sample was taken for each request, this change is **not attributed to either request individually**.
 - A 39-character hash in the first draft of the test fixture caused HTTP 500; after correcting the fixture to the exact 40-character hash found in TorrServer's local BoltDB, the smoke test passed. This was a test-data error, not an importer defect.
-- Production guardrails remained unchanged: `/opt/torr-arr-importer/importer.py` reports v1.4.0; Radarr/Sonarr 1080p timers remain inactive (enabled); v1.4.1 was not run against production SQLite.
+- At the time of this pre-install smoke test, production guardrails remained unchanged: `/opt/torr-arr-importer/importer.py` reported v1.4.0; Radarr/Sonarr 1080p timers were inactive (enabled); v1.4.1 had not yet been run against production SQLite. The later production installation and manual live runs are recorded in the section above.
 
-**Not yet validated:** CPU deltas under controlled repeatable load, comparison against the v1.3.5 executable, multi-hash queue load at realistic batch sizes, cross-profile concurrency on the host, and any production importer execution. No public v1.3.5 Git tag was found, and the host's local backup directory is not readable by the unprivileged account; permissions were not changed.
+**Not yet validated at the time of the pre-install smoke test:** CPU deltas under controlled repeatable load, comparison against the v1.3.5 executable, multi-hash queue load at realistic batch sizes, cross-profile concurrency on the host, and production importer execution. Production manual validation was completed subsequently and is recorded above. No public v1.3.5 Git tag was found, and the host's local backup directory is not readable by the unprivileged account; permissions were not changed.
 
 ## v1.4.0 superseded draft — non-blocking verification
 
@@ -73,7 +73,7 @@ The earlier v1.4.0 draft on `feature/nonblocking-hash-get-v1.4.0` passed its ori
 - Polling the paginated Arr /api/v3/history endpoint on each run.
 - Filtering to usable Grabbed records and normalizing/deduplicating their BitTorrent infohashes.
 - Retrieving the magnet or direct torrent URL through the history data.downloadUrl, including resolution of HTTP redirects.
-- Snapshotting TorrServer through POST /torrents with {"action":"list"}.
+- Inspecting new and unresolved TorrServer hashes through exact-hash POST /torrents with {"action":"get","hash":"..."}; ordinary and rebuild processing no longer snapshot the full torrent inventory.
 - Adding through TorrServer POST /torrents with title, movie/tv category, safe custom data JSON and save_to_db: true.
 - Fetching Radarr movie or Sonarr series details to obtain trustworthy provider IDs when they are missing from history.
 - Shared SQLite success history across all Arr instances, plus a pending-add table for restart-safe asynchronous verification.
