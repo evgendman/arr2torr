@@ -1,16 +1,32 @@
 # Operations and troubleshooting
 
-## Understand one cycle
+## Understand one v1.4.1 candidate cycle
 
-A normal cycle logs a concise summary of each stage:
+A normal cycle performs:
 
 1. START — selected instance, Arr type, category and target lane.
-2. HISTORY — full history records, Grabbed records, unique hashes, duplicates and skipped invalid records.
-3. A TorrServer list snapshot is read.
-4. SNAPSHOT — number of distinct Arr grabs, hashes currently on TorrServer, hashes already known to the shared import history and new candidates.
-5. For each candidate, Arr media/series details are fetched as needed, then an add is sent to TorrServer.
-6. ADD_ACCEPTED logs TorrServer's initial acknowledgement; ADDED is logged only after the exact hash exposes usable FileStats. A listed-but-incomplete hash is inspected with action=get, not blindly re-added.
-7. DONE records candidates, added/failed counts, ready hashes skipped as present, incomplete hashes, previously imported hashes, elapsed time and dry-run mode where applicable.
+2. HISTORY — fetch and deduplicate the configured Arr history.
+3. Read the shared SQLite import and pending state.
+4. For each unresolved pending hash owned by this instance, query only that exact hash with TorrServer `action=get`.
+5. For each new eligible Arr hash, query only that exact hash. If it is absent, prepare metadata, atomically claim it and submit one `action=add`.
+6. Inspect every immediate add response. A usable FileStats structure confirms success; otherwise the candidate joins the shared in-run verification queue.
+7. After the initial pass across pending and new candidates, poll all unresolved hashes in one carousel using exact-hash `action=get` at the configured `verification_poll_interval_sec`.
+8. Remove a hash from the queue immediately when valid FileStats appear. Each hash has its own `verification_timeout_sec` deadline (default 120 seconds); a timed-out hash remains pending for the next timer run.
+9. DONE — submitted/added/failed counts, pending count, and elapsed time.
+
+There is no full TorrServer inventory request. Verification is not a separate 120-second serial wait per candidate: one shared queue sweeps all unresolved hashes. An idle run with no new candidates and no pending hashes requiring observation makes **zero TorrServer API requests**.
+
+Useful log events:
+
+- `SKIPPED_PRESENT`: an exact-hash get returned usable FileStats; the hash was recorded in shared verified history.
+- `PENDING_EXISTING`: get found an object without usable FileStats; it entered the current run's queue.
+- `ADD_ACCEPTED_PENDING`: TorrServer acknowledged add but immediate FileStats were not ready; the hash entered the queue.
+- `VERIFY_QUEUED`: a candidate entered the shared carousel with its own timeout.
+- `PENDING_METADATA`: an action=get returned the object but its FileStats remain incomplete.
+- `PENDING_WAIT_TIMEOUT`: this hash's individual wait expired; it remains pending for the next timer run.
+- `PENDING_GET_MISSING`: exact-hash get returned 404 after a prior add. At most one such observation is counted in one importer execution; two separate runs are required before retry/backoff.
+- `ADDED ... recovery=action-get-in-run`: a later carousel read found usable FileStats and promoted the pending row.
+- `ADD_UNCERTAIN`: add result was ambiguous; the same run's carousel attempts read-only reconciliation.
 
 Example commands:
 
@@ -20,32 +36,46 @@ Example commands:
 
 If the timer is enabled, use systemctl list-timers 'torr-arr-importer@*' to check the next schedule.
 
-## The three-set model
+## State model and deliberate-removal protection
 
-On a regular run, the importer compares:
+The candidate does not compare complete Arr and TorrServer inventories. It uses:
 
-- what Arr still reports as Grabbed (A);
-- what exists in TorrServer right now (T);
-- what the shared SQLite database remembers as previously imported (I).
+- **A** — unique Grabbed hashes in the configured Arr history;
+- **I** — hashes in the shared SQLite verified-import history;
+- **P** — hashes in the shared SQLite pending table.
 
-The normal candidate set is:
+Normal mode excludes **I** without calling TorrServer. It observes only relevant rows in **P** and new hashes in **A − I − P**. If there is no relevant pending work and no new candidate, no TorrServer request is sent.
 
-    A − T − I
+Two distinct safeguards follow:
 
-This provides two distinct protections:
+- **Cross-instance duplicate protection:** every instance shares the same pending claim and verified-import state. Only one instance can own an unresolved hash and send its add request.
+- **Deliberate-removal protection:** once usable FileStats have confirmed a hash and it is in I, normal runs do not query TorrServer for it. Removing it from TorrServer therefore does not cause an automatic resurrection.
 
-- **TorrServer duplicate protection:** a hash already present in the receiving server is skipped, regardless of which Arr instance originally added it.
-- **Deliberate-removal protection:** a hash once successfully imported, then removed from TorrServer by the user, remains in the shared SQLite history. Normal runs do not resurrect it.
+A newly encountered hash that already exists in TorrServer with usable FileStats is recorded in I as an observed, ready item. Its FileStats are validated before that record is made.
 
-This is intentional behavior, not a lost synchronization event.
+## In-run verification and retry behavior
+
+TorrServer may return an add acknowledgement before metadata acquisition completes. The importer checks the immediate response, then queues any unresolved hash. Once the initial pass is complete, one shared carousel polls each queued hash through exact-hash `action=get` at the configured interval.
+
+Every hash receives an independent `verification_timeout_sec` deadline (default 120 seconds) beginning when it enters the queue. A successful hash is removed immediately. When a deadline expires, only that hash's current wait ends: the row stays pending for the next timer run. The timeout does not increment the add-attempt count, trigger blocklisting or create a separate metadata-failure counter.
+
+A present but incomplete object is never blindly re-added. In particular, `Torrent in db` is not success. On MatriX.145, the get handler can initiate the DB-backed reload into memory; the same run's later carousel reads observe the result.
+
+If a previously accepted add later returns HTTP 404:
+
+1. The first 404 is recorded but does not trigger an immediate add.
+2. A second 404 on a separate importer run moves the unresolved attempt into the existing bounded retry/backoff policy (or terminal failure when attempts are exhausted).
+3. A due retry performs another exact-hash get. Only if it is still absent and a current Arr Grab/download URL is available can another add be submitted.
+
+Repeated 404 responses during one in-run carousel count at most once. This reduces accidental re-adds when a user removes a torrent before its first verification run. It cannot perfectly distinguish deliberate removal from a failed metadata initialization; that ambiguity is inherent in polling without an explicit user-removal signal.
+
+Only actual add submissions consume `max_add_attempts`. Hash reservations, get calls, present-but-incomplete objects, network errors, 5xx responses and an individual verification timeout do not. Automatic HTTP retries are disabled for the side-effecting add call; read-only requests retain their configured retry behavior.
 
 ## When to use --rebuild
 
---rebuild is an explicit recovery/repopulation mode. It ignores the historical exclusion set I for that execution, but still skips hashes currently present in TorrServer:
+\`--rebuild\` is an explicit recovery/repopulation mode. It ignores the successful-import exclusion **I** for that execution, but still queries only the exact Arr hashes being reconsidered. A ready object with usable FileStats is skipped; an absent object may be re-added after an exact-hash 404 and a successful atomic claim.
 
-    Rebuild candidates = A − T
-
-Use it when switching to a clean/new TorrServer database, or when you intentionally want to restore all source-history releases that are currently missing from TorrServer.
+Use rebuild when switching to a clean/new TorrServer database, or when you intentionally want to restore source-history releases that were previously confirmed but are now missing. No full TorrServer list is fetched.
 
 Example:
 
@@ -54,15 +84,16 @@ Example:
       --config /etc/torr-arr-importer/radarr-1080.toml --rebuild
     sudo systemctl start torr-arr-importer@radarr-1080.timer
 
-Run rebuild for each relevant Arr instance if you want to repopulate the new TorrServer from all of their histories. Since all instances share SQLite state and each rebuild still checks current TorrServer membership, hashes added by the first instance will be seen by later instances and skipped.
+Run rebuild for each relevant Arr instance. Because the instances share SQLite claims and import history, later instances skip hashes already claimed or confirmed by an earlier instance.
 
-**The database does not need to be deleted for rebuild.** Do not remove the shared state file just to refill a clean TorrServer. Clearing it erases intentional-removal memory for every instance.
+**The database does not need to be deleted for rebuild.** Do not remove the shared state file; clearing it erases intentional-removal memory for every instance.
 
 ## Why multiple releases of one movie/series are retained
 
 Arr often focuses on the final chosen download in a conventional workflow. However, users can manually Grab different releases over time. Each unique infohash is treated as its own torrent. The importer deduplicates repeated history rows for the same hash, not distinct hashes for the same title.
 
-That means different versions of one movie or series can coexist in TorrServer. The downstream library can expose each one as a distinct root with its own source identity and allow the viewer to choose.
+That means different versions of one movie or series can all be retained when grabbed separately.
+
 
 ## Radarr/Sonarr blocklisting after terminal TorrServer failure
 
@@ -102,40 +133,36 @@ The Watchlist state is stored in the existing SQLite database. Do not delete the
 
 ## Why a release was not added
 
-Use the HISTORY and SNAPSHOT log lines first.
+Use the HISTORY, HASH_SYNC and per-hash events. There is no TorrServer SNAPSHOT stage in v1.4.1.
 
 | Log/result | Meaning and next check |
 |---|---|
-| skipped_no_data | The history record did not contain a usable data object. |
-| skipped_no_hash | No data.torrentInfoHash; the importer cannot deduplicate it reliably. |
-| skipped_no_url | No data.downloadUrl; the importer cannot pass the selected release to TorrServer. |
-| skipped_present | The hash has usable `FileStats` in TorrServer. This is expected and safe. |
-| present_incomplete | The hash appears in `action=list` but does not have usable `FileStats`; inspect metadata-recovery logs and the last observed status. |
-| skipped_known | The hash was previously imported, is now absent from TorrServer, and normal mode refuses to resurrect it. Use `--rebuild` only if restoration is intended. |
-| FAILED | The candidate reached the add attempt but failed. Read the sanitized error and check API reachability, authorization and the TorrServer response. |
-| candidates=0 | No eligible new hashes were found under the current filtering rule. It is not in itself an error. |
+| skipped_no_data / skipped_no_hash / skipped_no_url | The Arr history record does not contain the data needed to identify or transfer the chosen torrent. |
+| SKIPPED_PRESENT | Exact-hash get returned usable FileStats; the hash was added to shared verified history. |
+| PENDING_EXISTING / PENDING_METADATA | Exact-hash get found an object but its file structure is not ready. The importer queues it for repeated in-run get checks and does not send a duplicate add. |
+| ADD_ACCEPTED_PENDING | TorrServer acknowledged add, but the immediate response did not contain usable FileStats. It enters the shared in-run queue. |
+| PENDING_GET_MISSING | Exact-hash get returned 404. The log reports consecutive observations; the first 404 after an accepted add does not immediately trigger another add. |
+| PENDING_GET_FAILED / TORRSERVER_GET_FAILED | The read failed for a reason other than 404. This is an unknown observation, not evidence that the torrent is absent. |
+| ADD_REJECTED / ADD_UNCERTAIN | The add was rejected or its outcome is unknown. An uncertain outcome joins the current run's read-only get carousel. |
+| candidates=0 | No eligible new hashes were found. If there is also no pending work due for observation, TorrServer receives no request. |
 
-## Asynchronous add verification (strict FileStats criterion; installed v1.3.5)
+## In-run add verification (v1.4.1 candidate)
 
-An `ADD_ACCEPTED` log entry means TorrServer acknowledged the request; it is not a completed import. `ADDED` is logged only when the exact hash exposes a non-empty usable `FileStats` list. Each item must have a positive unique file ID and a unique safe relative path. The status string (`Torrent added`, `Torrent getting info`, `Torrent working` or `Torrent in db`) and `action=list` membership alone are not sufficient.
+The immediate `action=add` response is checked for usable FileStats. ADDED is logged immediately only when the exact expected hash has a non-empty usable file list, positive unique IDs and unique safe relative paths. An HTTP acknowledgement, echoed hash or status string such as Torrent added, Torrent getting info, Torrent working or Torrent in db is never sufficient on its own.
 
-The importer submits eligible candidates first, then polls a shared TorrServer `action=list` snapshot at a configurable interval. Each attempt has its own deadline measured from the initial add. Defaults are a 120-second verification deadline, a 3-second polling interval and three add/verification attempts. Compare the deadline with `TorrentDisconnectTimeout` in the installed TorrServer build.
+After the initial pass over pending hashes and all new candidates, arr2torr runs one shared carousel. It repeats exact-hash `action=get` requests at `verification_poll_interval_sec` (default 3 seconds) for every unresolved candidate. A hash is removed immediately after usable FileStats appear; the importer does not continue polling that hash.
 
-If the hash is present but has no usable `FileStats`, the importer checks the live object using `action=get`; it does not blindly send another add request. A DB-only `Torrent in db` record may receive one metadata-activation request per attempt, but not after the attempt deadline. If the hash disappears and the deadline expires, the existing bounded retry/backoff policy applies. A retry distinguishes an absent hash (another add can be submitted) from a still-present incomplete hash (re-observe/recover metadata first).
+Every hash has an independent `verification_timeout_sec` deadline (default 120 seconds), starting when it enters the queue. Expiration ends only that hash's current wait and leaves its pending row for the next timer invocation. It does not increment `attempt_count`, trigger blocklisting or create a separate metadata-failure counter.
+
+A present-but-incomplete object remains pending and is never blindly re-added. On TorrServer MatriX.145, a DB-only `Torrent in db` response from `action=get` can start reloading the torrent into memory; subsequent carousel reads in the same run observe that transition.
+
+A 404 after a previously accepted add is counted at most once per importer run, and two observations from separate runs are required before entering bounded retry/backoff. A 404 returned by the carousel shortly after an `add` submitted in the same run is not counted toward that threshold. It is left pending for the next run. Network errors and 5xx responses remain unknown observations, not evidence of absence.
 
 The shared state database contains:
-- `imports`: successful-import history and the intentional-removal safeguard. Entries written by v1.3.3 used the weaker list-only criterion and are not automatically reclassified; absent hashes remain protected from resurrection.
-- `pending_adds`: in-flight, retry-waiting or exhausted attempts. It now includes `metadata_activation_attempt`, added through an in-place migration. The table still excludes the original download URL and API keys.
+- `imports`: hashes confirmed by usable FileStats; this protects intentionally removed torrents from automatic resurrection in normal mode.
+- `pending_adds`: unresolved claims, actual add-attempt count, missing-observation count, retry state and notification/blocklist state. The original download URL and API keys are not stored. The `missing_observations` column is added through an in-place migration.
 
-After restart, pending attempts are reconciled against TorrServer and verified before promotion. Expired attempts use exponential backoff, capped at one hour; after the configured attempt limit the item remains failed and normal polling does not automatically resend it.
-
-To explicitly re-queue exhausted unverified attempts for one source instance, run:
-
-    sudo -u torrimport /opt/torr-arr-importer/importer.py --config /etc/torr-arr-importer/radarr-1080.toml --retry-failed
-
-Do not combine --retry-failed with --dry-run. This option re-queues only failed unverified attempts for the selected instance; it does not clear successful import history or automatically restore confirmed user-removed torrents. Use --rebuild only for intentional historical repopulation.
-
-In v1.3.5, verification means usable `FileStats` are available for the exact hash. This establishes that the downstream importer can inspect a file structure; it does not itself guarantee successful playback, seeding or durable disk commit.
+Only actual `action=add` submissions increment `attempt_count`; `action=get` observations do not consume `max_add_attempts`. Pending rows survive process restarts. A pending item is promoted to imports only after usable FileStats are observed. `--retry-failed` explicitly re-queues exhausted unverified attempts, while `--rebuild` is the deliberate exception to the normal successful-import safeguard.
 
 ## API and authentication errors
 

@@ -1,5 +1,38 @@
 # Changelog
 
+## torr-arr-importer v1.4.1 — installed and production-live-validated on MINI-Ubuntu (2026-10-31); not released
+
+- Restore in-run verification after the initial candidate pass, using one shared carousel of exact-hash TorrServer `action=get` requests for all unresolved candidates.
+- Poll at the configured `verification_poll_interval_sec`; each candidate has its own `verification_timeout_sec` deadline (default 120 seconds), measured from queue entry. Successfully verified hashes leave the queue immediately.
+- Keep candidates pending when their individual wait expires. A timeout ends only the current run's wait and does not increment `attempt_count`, trigger blocklisting or add a separate metadata-failure counter.
+- Count only actual `action=add` submissions against `max_add_attempts`. Repeated in-run 404s are not treated as separate timer-run observations; the existing two-run missing-hash safeguard remains.
+- Retain exact-hash reads, the shared SQLite state machine, atomic claims, no-full-inventory behavior and add-request retry protection.
+- **CI:** GitHub Actions [run #157](https://github.com/evgendman/arr2torr/actions/runs/41210488097) passed on Python 3.11, 3.12 and 3.14 with 61 tests per version, compilation and version check.
+- **Runtime identity:** installed at `/opt/torr-arr-importer/importer.py` on MINI-Ubuntu; `--version` reports `1.4.1`; Git blob SHA `c9943d92a396882765a92e01cb40d28aa7388777` matches the candidate source. The previous v1.4.0 executable was backed up.
+- **SQLite migration:** verified pre-migration SQLite backup was saved with SHA-256 `c701a4a5a953f12b59a25b183a54bf1963538fb0126b398fe9200f3661ab6dda`. The in-place migration added only `pending_adds.missing_observations`; no tables or rows were reset.
+- **Radarr live run:** the DB-only Groundhog Day (1993) entry became ready through the shared in-run exact-hash `action=get` carousel. Summary: submitted=0, added=1, failed=0, pending=22; duration=4.03 s. No duplicate add was submitted.
+- **Sonarr live run:** summary submitted=0, added=0, failed=0, pending=22; duration=5.31 s.
+- **Final production database:** `PRAGMA integrity_check` returned `ok`; imports=729; pending_adds=22 (Radarr failed=7, Sonarr failed=15); the Groundhog Day hash is present once in `imports` and absent from `pending_adds`.
+- Detailed dry-run counters, re-arm audit, trace paths and service-state caveats are recorded in [the MINI-Ubuntu production validation report](docs/VALIDATION-v1.4.1-MINI-Ubuntu-2026-10-31.md) and [ROADMAP.md](ROADMAP.md).
+- **Systemd scheduling:** the Radarr and Sonarr 1080p timers were re-enabled after manual validation and confirmed `enabled` and `active (waiting)` on 2026-10-31 at 22:04:09 +05:00. Both reported next trigger 22:09:09 +05:00; the timer listing contained exactly these two instances. The 4K timers were not touched.
+- **Still outstanding:** controlled CPU/request-count comparisons across idle, pending, small-batch and larger-library workloads, and an executable A/B comparison against v1.3.5.
+- **Publication:** validation is successful, but PR #6 remains draft; no v1.4.1 tag or GitHub Release has been published.
+
+## torr-arr-importer v1.4.0 — candidate, not deployed
+
+- Replace full TorrServer `action=list` snapshots in ordinary operation with hash-addressed `action=get` checks for new and unresolved torrents. A confirmed hash is recorded in shared SQLite verified-import history, so ordinary runs do not query it again.
+- Skip all TorrServer API requests when the current run has no new eligible hashes and no unresolved pending hashes that need observation. Arr history remains the source of new Grab discovery.
+- Validate the immediate `action=add` response. If it contains usable `FileStats` for the exact hash, confirm the import immediately; otherwise persist a pending attempt and return without waiting for metadata acquisition.
+- Remove the in-process verification polling loop and the 120-second synchronous wait. Unresolved hashes are checked by `action=get` during later systemd timer runs.
+- Separate atomic hash reservation from the add-attempt counter. Claims and read-only `get` requests do not consume `max_add_attempts`; the counter advances only when an actual `action=add` is submitted.
+- Disable automatic HTTP retries for TorrServer `action=add`. Ambiguous add outcomes are reconciled by exact-hash reads on later runs.
+- Require two separate timer-run 404 observations after an earlier accepted add before moving the operation into the bounded retry/backoff path. A 404 on a due retry can authorize the next add; network errors and 5xx responses do not count as absence.
+- Treat DB-only `Torrent in db` responses as incomplete. MatriX.145 `action=get` can trigger a database-backed torrent reload; the importer observes it on later runs instead of sending a duplicate metadata-activation `add`.
+- Preserve the strict success contract: only non-empty, safe `FileStats` for the exact hash can enter successful-import history. Preserve shared SQLite coordination, deliberate-removal protection, rebuild/retry commands, blocklisting, Seerr Watchlist and notifications.
+- Add an in-place `missing_observations` migration to track consecutive 404 observations without deleting or resetting the existing shared state database.
+- Add regression coverage for immediate readiness, deferred verification, empty cycles, exact-hash reads, present/incomplete and DB-only entries, ambiguous 404 handling, retry counters, rebuild and cross-instance claims.
+- **Validation status:** candidate branch only. GitHub Actions run #149 passed on Python 3.11/3.12 with 59 tests each, compilation and version check. Comparative CPU/request measurements and MINI-Ubuntu live validation remain before deployment; no runtime update is implied by this changelog entry.
+
 ## torr-arr-importer v1.3.5 — deployed and live-validated (2026-10-29)
 
 - Add explicit `sonarr_blocklist_enabled = true` to both Sonarr example TOMLs and parse the setting independently of Radarr's existing flag.

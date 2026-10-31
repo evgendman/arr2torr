@@ -4,7 +4,7 @@
 
 arr2torr is the project and documentation home for **torr-arr-importer**, a polling service that transfers releases selected with **Grab** in Radarr or Sonarr directly to the TorrServer API. It is intended for a media workflow where the user wants to start streaming from TorrServer, then expose those streams to a media library through STRM files or another integration.
 
-**torr-arr-importer v1.3.5 is deployed and live-validated on MINI-Ubuntu (2026-10-29).** GitHub Actions [run #139](https://github.com/evgendman/arr2torr/actions/runs/40844001781) passed on Python 3.11 and 3.12 with 56 tests per version, compilation and version check. Both Radarr and Sonarr terminal-failure blocklisting have now been exercised in live logs; see [Roadmap](ROADMAP.md) for observed results and remaining unrelated checks.
+**torr-arr-importer v1.4.1 is installed and manually live-validated on MINI-Ubuntu (2026-10-31).** The installed file matches candidate source blob `c9943d92a396882765a92e01cb40d28aa7388777`; production SQLite was migrated in place after a verified backup, and both Radarr and Sonarr manual runs completed successfully. GitHub Actions [run #157](https://github.com/evgendman/arr2torr/actions/runs/41210488097) passed on Python 3.11, 3.12 and 3.14 with 61 tests each. Draft [PR #6](https://github.com/evgendman/arr2torr/pull/6) remains unreleased; controlled CPU/request-count measurements remain. Both 1080p systemd timers are confirmed enabled and `active (waiting)` as of 2026-10-31 22:04:09 +05:00; both showed next trigger 22:09:09 +05:00. The 4K timers were not touched.
 
 ## Why this exists
 
@@ -56,29 +56,32 @@ With the usual five-minute timer, a successfully grabbed release is normally tra
 - Identifies each torrent by its BitTorrent infohash (the history field data.torrentInfoHash).
 - Handles the paginated /api/v3/history response and scans available history on each run, so it does not rely on a fragile “last processed timestamp”.
 - Deduplicates repeated history records for the same infohash, keeping the newest record.
-- Reads the current TorrServer torrent list and compares hashes before adding anything.
+- Checks only relevant hashes through exact-hash TorrServer `action=get`; ordinary and rebuild processing do not fetch the full TorrServer inventory.
 - Resolves the Arr history data.downloadUrl. In the tested Prowlarr setup, this URL redirects to the original magnet link.
 - Adds the torrent through TorrServer's /torrents API, including the Arr title, media category and a safe subset of Arr metadata in data.
 - Uses one shared SQLite database across all importer instances for verified imports and restart-safe pending attempts.
-- Treats the initial add response and exact-hash membership in `action=list` as intermediate signals; success requires usable `FileStats` for that hash.
-- Submits candidates first and verifies the batch with one polling loop and per-hash deadlines rather than serially waiting for each add.
-- Retries unverified attempts with bounded exponential backoff and avoids resending hashes that are still pending on TorrServer.
+- Requires usable `FileStats` for the exact hash before recording a successful import; an HTTP acknowledgement or status string alone is not success.
+- In the v1.4.1 candidate, atomically claims new hashes in shared SQLite before checking only those exact hashes with `action=get`; ordinary runs do not call `action=list`.
+- After the initial pass over all candidates, polls every unresolved hash in one shared in-run carousel. Each hash has its own 120-second default deadline and leaves the queue immediately when valid `FileStats` appear; timed-out hashes remain pending for the next timer run.
+- Disables automatic HTTP retries for the side-effecting `action=add`; bounded retries are governed by the persistent SQLite state machine.
 - Supports non-mutating --dry-run, deliberate --rebuild, and explicit --retry-failed for exhausted unverified attempts.
 - For Radarr and Sonarr, can send terminal TorrServer add/verification failures to the respective native failed-download handling and blocklist once max_add_attempts is exhausted; independently configurable per instance.
 - Uses separate per-instance configuration and lock files, while sharing the import-history database.
 - Redacts API-key-like URL parameters from logs and exceptions.
 
-## Asynchronous add verification (v1.1.0)
+## Asynchronous add verification (v1.4.1 candidate)
 
-TorrServer may acknowledge an add request before its background metadata acquisition completes. An expected hash in the initial response is therefore not treated as final success.
+TorrServer may acknowledge an add request before metadata acquisition completes. The immediate add response is inspected for usable `FileStats`; only that exact-hash structure can confirm success. An HTTP 200 response, an echoed hash, or a status string such as `Torrent added`, `Torrent working` or `Torrent in db` is not sufficient.
 
-The importer persists a pending attempt before the add request, submits eligible releases first, then polls TorrServer at a configurable interval. Every pending hash has its own deadline. In v1.3.5, the exact hash must expose a non-empty, usable `FileStats` list before it is recorded as a successful import. Entries need positive unique file IDs and unique safe relative paths. If a hash is present but incomplete, the importer inspects the live object with `action=get` rather than blindly sending another add; a DB-only `Torrent in db` record gets a bounded metadata-activation request before polling continues. The immediate response and list membership are not final success.
+The importer first checks all relevant pending hashes and new Arr candidates with exact-hash `action=get`. It sends `action=add` only when the hash is absent. A ready response is confirmed immediately; any incomplete or uncertain candidate enters one shared in-run verification queue. After the initial pass is complete, the importer sweeps that queue with `action=get` at the configured `verification_poll_interval_sec` (default 3 seconds). The queue is shared, not a separate 120-second wait for each torrent.
 
-Pending attempts live in the shared SQLite table pending_adds and do not contain the credential-bearing download URL. After a process restart, they are reconciled against TorrServer before retrying. Failures use bounded exponential backoff and stop automatically after the configured attempt limit; --retry-failed explicitly re-queues exhausted, never-confirmed attempts for the selected Arr instance.
+Each hash receives its own `verification_timeout_sec` deadline (default 120 seconds) beginning when it enters the queue. A hash is removed as soon as valid `FileStats` appear. When its deadline expires, only that hash's current wait ends: it stays pending in SQLite and can be checked again on the next timer run. A timeout does not increase the add-attempt count, trigger blocklisting or create a separate metadata-failure counter.
 
-Verification means TorrServer exposes usable `FileStats` for the exact hash. Mere list membership does not confirm file structure or downstream readiness. Older successful-import records that are absent from TorrServer remain protected from automatic resurrection; because v1.3.3 did not store verification provenance, pre-existing success rows are not automatically reclassified. Use `--rebuild` only when deliberately repopulating missing historical entries.
+A present but incomplete object is never blindly re-added. In TorrServer MatriX.145, `action=get` can trigger asynchronous recovery of a database-only object; subsequent carousel reads observe the transition. The existing ambiguity safeguard remains: after a previously accepted add, a missing hash must be observed on two separate importer runs before entering the bounded retry/backoff path. Multiple 404 responses within one carousel execution count at most once.
 
-Default verification settings are verification_timeout_sec = 120, verification_poll_interval_sec = 3.0, retry_backoff_sec = 60 (doubling per failed attempt, capped at one hour), and max_add_attempts = 3. Compare the timeout with the TorrentDisconnectTimeout setting of the installed TorrServer build.
+Only actual `action=add` submissions consume `max_add_attempts`. Hash reservations, get calls, present-but-incomplete objects and verification timeouts do not. Automatic HTTP retries are disabled for the side-effecting `add` request.
+
+Only usable, non-empty `FileStats` for the exact hash can create a successful-import record. Entries must have positive unique file IDs and unique safe relative paths. Confirmed hashes are not queried again during ordinary runs, preserving the safeguard against resurrecting torrents deliberately removed by the user. `--rebuild` remains the explicit operator-controlled exception. v1.4.1 is installed and production-live-validated on MINI-Ubuntu; the production SQLite was migrated in place after a verified backup. Both 1080p timers are enabled and `active (waiting)`; controlled CPU/request-count measurements remain outstanding.
 
 ## Final-failure Apprise notifications (introduced in v1.3.2; retained in v1.3.5)
 
@@ -189,7 +192,7 @@ The Prowlarr URL can contain its API key. The importer resolves the redirect and
 | Sonarr history | GET /api/v3/history?page=1&pageSize=1000&sortKey=date&sortDirection=descending | Find Grabbed series releases |
 | Radarr media details | GET /api/v3/movie/{movieId} | Resolve IMDb/TMDb identity and related metadata |
 | Sonarr series details | GET /api/v3/series/{seriesId} | Resolve IMDb/TMDb/TVDb identity and related metadata |
-| TorrServer list | POST /torrents with {"action":"list"} | Snapshot existing infohashes |
+| TorrServer get | POST /torrents with {"action":"get","hash":"..."} | Inspect one new or unresolved infohash; no full library snapshot |
 | TorrServer add | POST /torrents with {"action":"add",...} | Add a torrent and preserve metadata |
 
 The Arr API key is sent in the X-Api-Key header. The exact download URL is used only to obtain the magnet/direct torrent link; it is not stored in TorrServer data.
@@ -204,7 +207,7 @@ The current stored data subset includes source instance name, media type, target
 - [Roadmap and validation status](ROADMAP.md)
 - [Version history](CHANGELOG.md)
 
-The installed and verified runtime is **torr-arr-importer v1.3.5**. It uses Python 3.11+ and the standard library; it does not require external Python packages. The live Radarr and Sonarr terminal-failure blocklist paths are confirmed; GitHub PR #4 remains open and no v1.3.5 tag or GitHub Release has been published yet.
+The current MINI-Ubuntu runtime is **torr-arr-importer v1.4.1**, installed at `/opt/torr-arr-importer/importer.py` with Git blob SHA `c9943d92a396882765a92e01cb40d28aa7388777`. The production SQLite migration and manual Radarr/Sonarr runs passed; final `PRAGMA integrity_check` returned `ok`, with 729 imports and 22 retained terminal pending rows. Both 1080p timers are enabled and `active (waiting)`; both next showed 22:09:09 +05:00 at the 22:04:09 status check. See the [production validation report](docs/VALIDATION-v1.4.1-MINI-Ubuntu-2026-10-31.md) and [draft PR #6](https://github.com/evgendman/arr2torr/pull/6). The PR remains unreleased. Controlled CPU/request-count measurements remain. The service uses Python 3.11+ and the standard library.
 
 ## Related project: STRM/NFO library generation
 
@@ -212,8 +215,8 @@ The installed and verified runtime is **torr-arr-importer v1.3.5**. It uses Pyth
 
 ## Current status
 
-MINI-Ubuntu is running **torr-arr-importer v1.3.5**. The installed `importer.py` file's Git blob SHA (`712d6f4a276602250a25c52c5f5ccf6b0af92667`) matches the corresponding source file on the feature branch byte-for-byte. GitHub Actions [run #139](https://github.com/evgendman/arr2torr/actions/runs/40844001781) passed on Python 3.11 and 3.12 with 56 tests per version, compilation and version check.
+The current MINI-Ubuntu runtime is **torr-arr-importer v1.4.1**. Its source identity, SQLite migration, manual production runs, final DB checks and timer restoration are recorded in the [v1.4.1 validation report](docs/VALIDATION-v1.4.1-MINI-Ubuntu-2026-10-31.md). Both 1080p timers are enabled and `active (waiting)`; no 4K timer was enabled. Draft [PR #6](https://github.com/evgendman/arr2torr/pull/6) remains open and unreleased. Representative CPU/request-count measurements and a v1.3.5 executable A/B comparison remain outstanding.
 
 Live logs on 2026-10-29 confirmed 20 fresh/replacement additions reaching `ADDED verification=usable-file-stats`. For Radarr, seven terminally failed release choices reached the native failed-history action and logged `RADARR_BLOCKLIST_BLOCKED`; three grouped critical Apprise notifications were acknowledged with HTTP 200, and five replacements were verified. For Sonarr, five failed release choices logged `SONARR_BLOCKLIST_BLOCKED`; replacement additions for Outer Banks S01, Outer Banks S03 and Dark S03 were verified. No alternative additions for Love, Death & Robots S02/S03 were observed in the reviewed log window, but the native blocklist actions themselves are confirmed. The blocklist implementation/validation milestone is complete for both applications; replacement availability remains dependent on each app's own settings and available releases.
 
-Remaining unrelated checks are to confirm one `FileStats`-verified release through downstream `torr2strm`, reassess 32 historical success rows created under v1.3.3 without resetting SQLite or resurrecting intentionally removed hashes, and recheck that the active Radarr config explicitly states `radarr_blocklist_enabled = true`. GitHub PR #4 remains open; no v1.3.5 tag or GitHub Release has been published yet.
+Remaining follow-ups are to confirm downstream `torr2strm` processing and reassess the 32 historical success rows created under v1.3.3 without resetting SQLite or resurrecting intentionally removed hashes. For v1.4.1, controlled CPU/request-count measurements and the unavailable v1.3.5 executable A/B comparison remain; production functional validation is complete and recorded in [Roadmap](ROADMAP.md) and the [MINI-Ubuntu validation report](docs/VALIDATION-v1.4.1-MINI-Ubuntu-2026-10-31.md).

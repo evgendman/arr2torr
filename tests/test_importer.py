@@ -47,6 +47,18 @@ def ready_record(torrent_hash, title="Example Movie"):
     }
 
 
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+
 def make_config(root):
     return importer.Config(
         name="radarr-1080",
@@ -183,414 +195,537 @@ class PendingStateTests(unittest.TestCase):
 
 
 class BatchVerificationTests(unittest.TestCase):
-    def test_batch_polling_confirms_fast_and_slow_hashes(self):
+    def get_404(self, _cfg, _ts, torrent_hash):
+        raise importer.HttpStatusError(
+            404, "POST", "http://127.0.0.1:8092/torrents", f"not found: {torrent_hash}",
+        )
+
+    def test_immediate_add_file_stats_confirms_without_waiting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab()
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(importer, "fetch_torrserver") as list_mock,
+                mock.patch.object(
+                    importer, "fetch_torrserver_item", side_effect=self.get_404,
+                ) as get_mock,
+                mock.patch.object(importer, "fetch_media", return_value={"imdbId": "tt123"}),
+                mock.patch.object(
+                    importer, "add_to_torrserver", return_value=ready_record(HASH1),
+                ) as add_mock,
+                mock.patch.object(importer.time, "sleep") as sleep_mock,
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 0)
+            get_mock.assert_called_once_with(mock.ANY, mock.ANY, HASH1)
+            add_mock.assert_called_once()
+            list_mock.assert_not_called()
+            sleep_mock.assert_not_called()
+            db = importer.StateDB(cfg.state_db)
+            self.assertEqual(db.all_hashes(), {HASH1})
+            self.assertEqual(db.pending_rows(), [])
+            db.close()
+
+
+    def test_add_acknowledgement_is_polled_in_run_until_file_stats_appear(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab()
+            calls = 0
+
+            def get_item(_cfg, _ts, torrent_hash):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise self.get_404(_cfg, _ts, torrent_hash)
+                if calls == 2:
+                    return {"hash": HASH1, "stat": 1, "stat_string": "Torrent getting info"}
+                return ready_record(HASH1)
+
+            clock = FakeClock()
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(importer, "fetch_torrserver") as list_mock,
+                mock.patch.object(importer, "fetch_torrserver_item", side_effect=get_item) as get_mock,
+                mock.patch.object(importer, "fetch_media", return_value={"imdbId": "tt123"}),
+                mock.patch.object(
+                    importer, "add_to_torrserver",
+                    return_value={"hash": HASH1, "stat_string": "Torrent added"},
+                ) as add_mock,
+                mock.patch.object(importer.time, "monotonic", side_effect=clock.monotonic),
+                mock.patch.object(importer.time, "sleep", side_effect=clock.sleep) as sleep_mock,
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(get_mock.call_count, 3)
+            add_mock.assert_called_once()
+            list_mock.assert_not_called()
+            self.assertEqual(sleep_mock.call_count, 2)
+            db = importer.StateDB(cfg.state_db)
+            self.assertEqual(db.all_hashes(), {HASH1})
+            self.assertEqual(db.pending_rows(), [])
+            db.close()
+    def test_next_timer_run_confirms_pending_hash_by_get(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab()
+            db = importer.StateDB(cfg.state_db)
+            self.assertTrue(db.claim_pending(grab, cfg.name, {"imdbId": "tt123"}, 10))
+            self.assertEqual(db.start_add_attempt(HASH1, 3, 10), 1)
+            db.observe_pending(HASH1, "add-accepted: Torrent added")
+            db.close()
+
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(importer, "fetch_torrserver") as list_mock,
+                mock.patch.object(
+                    importer, "fetch_torrserver_item", return_value=ready_record(HASH1),
+                ) as get_mock,
+                mock.patch.object(importer, "add_to_torrserver") as add_mock,
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 0)
+            get_mock.assert_called_once_with(mock.ANY, mock.ANY, HASH1)
+            add_mock.assert_not_called()
+            list_mock.assert_not_called()
+            db = importer.StateDB(cfg.state_db)
+            self.assertEqual(db.all_hashes(), {HASH1})
+            self.assertEqual(db.pending_rows(), [])
+            db.close()
+
+
+    def test_present_incomplete_or_db_only_object_is_polled_until_its_own_timeout(self):
+        for status in ("Torrent working", "Torrent in db"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as tmp:
+                cfg = make_config(Path(tmp))
+                grab = make_grab()
+                existing = {"hash": HASH1, "stat": 5, "stat_string": status}
+                clock = FakeClock()
+                with (
+                    mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                    mock.patch.object(importer, "fetch_torrserver") as list_mock,
+                    mock.patch.object(importer, "fetch_torrserver_item", return_value=existing) as get_mock,
+                    mock.patch.object(importer, "fetch_media", return_value={"tmdbId": 123}),
+                    mock.patch.object(importer, "add_to_torrserver") as add_mock,
+                    mock.patch.object(importer.time, "monotonic", side_effect=clock.monotonic),
+                    mock.patch.object(importer.time, "sleep", side_effect=clock.sleep),
+                ):
+                    rc = importer.run(cfg)
+
+                self.assertEqual(rc, 0)
+                self.assertGreater(get_mock.call_count, 1)
+                add_mock.assert_not_called()
+                list_mock.assert_not_called()
+                db = importer.StateDB(cfg.state_db)
+                self.assertNotIn(HASH1, db.all_hashes())
+                row = db.pending_rows()[0]
+                self.assertEqual(row["status"], "pending")
+                self.assertEqual(row["attempt_count"], 0)
+                self.assertEqual(row["tmdb_id"], "123")
+                self.assertEqual(row["last_status"], "verification-timeout-deferred")
+                db.close()
+    def test_existing_ready_hash_is_recorded_and_not_queried_on_idle_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab()
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(
+                    importer, "fetch_torrserver_item", return_value=ready_record(HASH1),
+                ) as get_mock,
+                mock.patch.object(importer, "fetch_torrserver") as list_mock,
+                mock.patch.object(importer, "fetch_media") as media_mock,
+                mock.patch.object(importer, "add_to_torrserver") as add_mock,
+            ):
+                self.assertEqual(importer.run(cfg), 0)
+                get_mock.assert_called_once()
+                db = importer.StateDB(cfg.state_db)
+                self.assertIn(HASH1, db.all_hashes())
+                db.close()
+
+                get_mock.reset_mock()
+                self.assertEqual(importer.run(cfg), 0)
+                get_mock.assert_not_called()
+                list_mock.assert_not_called()
+                media_mock.assert_not_called()
+                add_mock.assert_not_called()
+
+    def test_no_work_means_no_torrserver_requests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab()
+            db = importer.StateDB(cfg.state_db)
+            db.add(grab, cfg.name, {})
+            db.close()
+
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(importer, "fetch_torrserver") as list_mock,
+                mock.patch.object(importer, "fetch_torrserver_item") as get_mock,
+                mock.patch.object(importer, "add_to_torrserver") as add_mock,
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 0)
+            list_mock.assert_not_called()
+            get_mock.assert_not_called()
+            add_mock.assert_not_called()
+
+    def test_cross_instance_pending_claim_blocks_duplicate_get_and_add(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab()
+            db = importer.StateDB(cfg.state_db)
+            self.assertTrue(db.claim_pending(grab, "sonarr-1080", {}, 10))
+            db.close()
+
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(importer, "fetch_torrserver_item") as get_mock,
+                mock.patch.object(importer, "add_to_torrserver") as add_mock,
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 0)
+            get_mock.assert_not_called()
+            add_mock.assert_not_called()
+
+    def test_first_404_after_accepted_add_is_not_immediately_retried(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab()
+            db = importer.StateDB(cfg.state_db)
+            db.claim_pending(grab, cfg.name, {}, 10)
+            db.start_add_attempt(HASH1, 3, 10)
+            db.observe_pending(HASH1, "add-accepted: Torrent added")
+            db.close()
+
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(importer, "fetch_torrserver_item", side_effect=self.get_404),
+                mock.patch.object(importer, "add_to_torrserver") as add_mock,
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 0)
+            add_mock.assert_not_called()
+            db = importer.StateDB(cfg.state_db)
+            row = db.pending_rows()[0]
+            self.assertEqual(row["status"], "pending")
+            self.assertEqual(row["missing_observations"], 1)
+            self.assertEqual(row["attempt_count"], 1)
+            db.close()
+
+    def test_second_404_moves_attempt_to_bounded_retry_without_same_run_add(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab()
+            db = importer.StateDB(cfg.state_db)
+            db.claim_pending(grab, cfg.name, {}, 10)
+            db.start_add_attempt(HASH1, 3, 10)
+            db.record_missing_observation(HASH1, "first 404")
+            db.close()
+
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(importer, "fetch_torrserver_item", side_effect=self.get_404),
+                mock.patch.object(importer, "add_to_torrserver") as add_mock,
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 0)
+            add_mock.assert_not_called()
+            db = importer.StateDB(cfg.state_db)
+            row = db.pending_rows()[0]
+            self.assertEqual(row["status"], "retry_wait")
+            self.assertEqual(row["attempt_count"], 1)
+            db.close()
+
+
+
+    def test_due_retry_checks_exact_hash_then_increments_only_real_add_attempt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab()
+            db = importer.StateDB(cfg.state_db)
+            db.claim_pending(grab, cfg.name, {"imdbId": "tt123"}, 10)
+            db.start_add_attempt(HASH1, 3, 10)
+            db.conn.execute(
+                "UPDATE pending_adds SET status='retry_wait', next_retry_at=?, missing_observations=2 WHERE hash=?",
+                (
+                    (importer.datetime.now(importer.timezone.utc) - importer.timedelta(seconds=2)).isoformat(),
+                    HASH1,
+                ),
+            )
+            db.conn.commit()
+            db.close()
+
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(importer, "fetch_torrserver_item", side_effect=self.get_404) as get_mock,
+                mock.patch.object(importer, "fetch_media", return_value={"imdbId": "tt123"}),
+                mock.patch.object(
+                    importer, "add_to_torrserver",
+                    return_value={"hash": HASH1, "stat_string": "Torrent added"},
+                ) as add_mock,
+                mock.patch.object(importer.time, "sleep"),
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(get_mock.call_count, 2)  # pre-add check + in-run reconciliation
+            add_mock.assert_called_once()
+            db = importer.StateDB(cfg.state_db)
+            row = db.pending_rows()[0]
+            self.assertEqual(row["attempt_count"], 2)
+            self.assertEqual(row["status"], "pending")
+            self.assertEqual(row["missing_observations"], 0)
+            db.close()
+    def test_new_candidate_is_claimed_before_first_get_and_queued_after_add(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab()
+            calls = 0
+
+            def inspect_claim_before_get(_cfg, _ts, torrent_hash):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    db = importer.StateDB(cfg.state_db)
+                    try:
+                        rows = db.pending_rows(cfg.name)
+                        self.assertEqual(len(rows), 1)
+                        self.assertEqual(rows[0]["hash"], torrent_hash)
+                        self.assertEqual(rows[0]["status"], "pending")
+                        self.assertEqual(rows[0]["attempt_count"], 0)
+                    finally:
+                        db.close()
+                raise self.get_404(_cfg, _ts, torrent_hash)
+
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(
+                    importer, "fetch_torrserver_item", side_effect=inspect_claim_before_get,
+                ) as get_mock,
+                mock.patch.object(importer, "fetch_media", return_value={"tmdbId": 123}),
+                mock.patch.object(
+                    importer, "add_to_torrserver",
+                    return_value={"hash": HASH1, "stat_string": "Torrent added"},
+                ) as add_mock,
+                mock.patch.object(importer.time, "sleep") as sleep_mock,
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(get_mock.call_count, 2)
+            add_mock.assert_called_once()
+            sleep_mock.assert_called_once()
+            db = importer.StateDB(cfg.state_db)
+            row = db.pending_rows()[0]
+            self.assertEqual(row["attempt_count"], 1)
+            # The post-add 404 inside this same run is not a distinct-run
+            # missing observation; the next timer run must establish that.
+            self.assertEqual(row["missing_observations"], 0)
+            db.close()
+    def test_transient_get_error_is_retried_in_the_same_queue_without_add(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab()
+            clock = FakeClock()
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(
+                    importer, "fetch_torrserver_item",
+                    side_effect=[
+                        importer.NetworkError("temporary connection failure"),
+                        ready_record(HASH1),
+                    ],
+                ) as get_mock,
+                mock.patch.object(importer, "fetch_media") as media_mock,
+                mock.patch.object(importer, "add_to_torrserver") as add_mock,
+                mock.patch.object(importer.time, "monotonic", side_effect=clock.monotonic),
+                mock.patch.object(importer.time, "sleep", side_effect=clock.sleep),
+            ):
+                rc = importer.run(cfg)
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(get_mock.call_count, 2)
+            media_mock.assert_not_called()
+            add_mock.assert_not_called()
+            db = importer.StateDB(cfg.state_db)
+            self.assertIn(HASH1, db.all_hashes())
+            self.assertEqual(db.pending_rows(), [])
+            db.close()
+    def test_rebuild_can_readd_known_hash_but_normal_mode_never_queries_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = make_config(Path(tmp))
+            grab = make_grab()
+            db = importer.StateDB(cfg.state_db)
+            db.add(grab, cfg.name, {})
+            db.close()
+
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(importer, "fetch_torrserver_item") as get_normal,
+                mock.patch.object(importer, "add_to_torrserver") as add_normal,
+            ):
+                self.assertEqual(importer.run(cfg), 0)
+                get_normal.assert_not_called()
+                add_normal.assert_not_called()
+
+            with (
+                mock.patch.object(importer, "fetch_history", return_value=[grab]),
+                mock.patch.object(importer, "fetch_torrserver_item", side_effect=self.get_404),
+                mock.patch.object(importer, "fetch_media", return_value={"tmdbId": 123}),
+                mock.patch.object(
+                    importer, "add_to_torrserver",
+                    return_value={"hash": HASH1, "stat_string": "Torrent added"},
+                ) as add_rebuild,
+            ):
+                self.assertEqual(importer.run(cfg, rebuild=True), 0)
+                add_rebuild.assert_called_once()
+
+    def test_add_request_has_no_automatic_http_retries(self):
+        cfg = make_config(Path("."))
+        grab = make_grab()
+        ts = mock.Mock()
+        ts.request_json.return_value = {"hash": HASH1, "stat_string": "Torrent added"}
+        importer.add_to_torrserver(
+            cfg, ts, grab, {}, resolved_link=grab.download_url,
+        )
+        self.assertEqual(ts.request_json.call_args.kwargs["retry_count"], 0)
+
+
+
+    def test_shared_carousel_removes_each_hash_immediately_after_file_stats(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = make_config(Path(tmp))
             grabs = [
                 make_grab(HASH1, 1, "Fast Movie"),
                 make_grab(HASH2, 2, "Slow Movie"),
             ]
-            not_ready = {
-                "hash": HASH2,
-                "title": "Slow Movie",
-                "stat": 1,
-                "stat_string": "Torrent getting info",
-            }
-            list_results = [
-                [],
-                [ready_record(HASH1, "Fast Movie"), not_ready],
-                [ready_record(HASH1, "Fast Movie"), ready_record(HASH2, "Slow Movie")],
-            ]
+            calls = {HASH1: 0, HASH2: 0}
 
+            def get_item(_cfg, _ts, torrent_hash):
+                calls[torrent_hash] += 1
+                count = calls[torrent_hash]
+                if count == 1:
+                    raise self.get_404(_cfg, _ts, torrent_hash)
+                if torrent_hash == HASH1 and count >= 3:
+                    return ready_record(HASH1, "Fast Movie")
+                if torrent_hash == HASH2 and count >= 4:
+                    return ready_record(HASH2, "Slow Movie")
+                return {
+                    "hash": torrent_hash, "stat": 1,
+                    "stat_string": "Torrent getting info",
+                }
+
+            clock = FakeClock()
             with (
                 mock.patch.object(importer, "fetch_history", return_value=grabs),
-                mock.patch.object(importer, "fetch_torrserver", side_effect=list_results) as list_mock,
-                mock.patch.object(importer, "fetch_media", return_value={"imdbId": "tt123"}),
+                mock.patch.object(importer, "fetch_torrserver_item", side_effect=get_item) as get_mock,
+                mock.patch.object(importer, "fetch_media", return_value={"tmdbId": 123}),
                 mock.patch.object(
-                    importer,
-                    "add_to_torrserver",
+                    importer, "add_to_torrserver",
                     side_effect=lambda _cfg, _ts, grab, _media, resolved_link=None: {
-                        "hash": grab.hash,
-                        "stat_string": "Torrent added",
+                        "hash": grab.hash, "stat_string": "Torrent added",
                     },
                 ) as add_mock,
+                mock.patch.object(importer.time, "monotonic", side_effect=clock.monotonic),
+                mock.patch.object(importer.time, "sleep", side_effect=clock.sleep) as sleep_mock,
             ):
                 rc = importer.run(cfg)
 
             self.assertEqual(rc, 0)
             self.assertEqual(add_mock.call_count, 2)
-            self.assertEqual(list_mock.call_count, 3)
+            self.assertEqual(calls[HASH1], 3)  # no more reads after its success
+            self.assertEqual(calls[HASH2], 4)
+            self.assertEqual(get_mock.call_count, 7)
+            self.assertEqual(sleep_mock.call_count, 3)
             db = importer.StateDB(cfg.state_db)
             self.assertEqual(db.all_hashes(), {HASH1, HASH2})
             self.assertEqual(db.pending_rows(), [])
             db.close()
 
-    def test_present_live_hash_without_file_stats_is_reobserved_not_readded(self):
+
+    def test_queue_deadlines_are_individual_and_do_not_extend_each_other(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = make_config(Path(tmp))
-            grab = make_grab()
-            live_incomplete = {
-                "hash": HASH1, "stat": 1, "stat_string": "Torrent getting info",
-            }
+            grabs = [
+                make_grab(HASH1, 1, "First Movie"),
+                make_grab(HASH2, 2, "Second Movie"),
+            ]
+            clock = FakeClock()
+            initial_calls = {HASH1: 0, HASH2: 0}
+
+            def get_item(_cfg, _ts, torrent_hash):
+                # The second candidate enters the queue four seconds later.
+                initial_calls[torrent_hash] += 1
+                if initial_calls[torrent_hash] == 1:
+                    if torrent_hash == HASH2:
+                        clock.sleep(4.0)
+                    return {
+                        "hash": torrent_hash, "stat": 1,
+                        "stat_string": "Torrent getting info",
+                    }
+                if torrent_hash == HASH2 and clock.now >= 10.0:
+                    return ready_record(HASH2, "Second Movie")
+                return {
+                    "hash": torrent_hash, "stat": 1,
+                    "stat_string": "Torrent getting info",
+                }
+
             with (
-                mock.patch.object(importer, "fetch_history", return_value=[grab]),
-                mock.patch.object(
-                    importer, "fetch_torrserver",
-                    side_effect=[[live_incomplete], [ready_record(HASH1)]],
-                ),
-                mock.patch.object(importer, "fetch_media", return_value={"imdbId": "tt123"}),
-                mock.patch.object(importer, "fetch_torrserver_item", return_value=live_incomplete),
+                mock.patch.object(importer, "fetch_history", return_value=grabs),
+                mock.patch.object(importer, "fetch_torrserver_item", side_effect=get_item) as get_mock,
+                mock.patch.object(importer, "fetch_media", return_value={"tmdbId": 123}),
                 mock.patch.object(importer, "add_to_torrserver") as add_mock,
+                mock.patch.object(importer.time, "monotonic", side_effect=clock.monotonic),
+                mock.patch.object(importer.time, "sleep", side_effect=clock.sleep),
             ):
                 rc = importer.run(cfg)
 
             self.assertEqual(rc, 0)
             add_mock.assert_not_called()
+            # First entered at t=0 and times out at t=10. The second entered
+            # at t=4, remains eligible until t=14 and succeeds after t=10.
+            self.assertEqual(clock.now, 10.0)
             db = importer.StateDB(cfg.state_db)
-            self.assertEqual(db.all_hashes(), {HASH1})
-            self.assertEqual(db.pending_rows(), [])
+            rows = {row["hash"]: row for row in db.pending_rows()}
+            self.assertEqual(rows[HASH1]["last_status"], "verification-timeout-deferred")
+            self.assertIn(HASH2, db.all_hashes())
+            self.assertNotIn(HASH2, rows)
             db.close()
 
-    def test_db_only_hash_activates_metadata_once_then_waits_for_file_stats(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg = make_config(Path(tmp))
-            grab = make_grab()
-            db_only = {
-                "hash": HASH1, "stat": 5, "stat_string": "Torrent in db",
-            }
-            with (
-                mock.patch.object(importer, "fetch_history", return_value=[grab]),
-                mock.patch.object(
-                    importer, "fetch_torrserver",
-                    side_effect=[[db_only], [ready_record(HASH1)]],
-                ),
-                mock.patch.object(importer, "fetch_media", return_value={"imdbId": "tt123"}),
-                mock.patch.object(
-                    importer, "add_to_torrserver",
-                    return_value={"hash": HASH1, "stat_string": "Torrent added"},
-                ) as add_mock,
-                mock.patch.object(importer, "fetch_torrserver_item") as get_mock,
-            ):
-                rc = importer.run(cfg)
-
-            self.assertEqual(rc, 0)
-            add_mock.assert_called_once()
-            get_mock.assert_not_called()
-            db = importer.StateDB(cfg.state_db)
-            self.assertEqual(db.all_hashes(), {HASH1})
-            self.assertEqual(db.pending_rows(), [])
-            db.close()
-
-    def test_expired_pending_db_only_does_not_send_metadata_activation(self):
+    def test_present_file_stats_reset_consecutive_missing_observations(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = make_config(Path(tmp))
             grab = make_grab()
             db = importer.StateDB(cfg.state_db)
-            db.begin_pending(grab, cfg.name, {"imdbId": "tt123"}, cfg.verification_timeout_sec)
-            db.conn.execute(
-                "UPDATE pending_adds SET deadline_at=? WHERE hash=?",
-                (
-                    (importer.datetime.now(importer.timezone.utc) - importer.timedelta(seconds=1)).isoformat(),
-                    HASH1,
-                ),
-            )
-            db.conn.commit()
+            db.claim_pending(grab, cfg.name, {}, 10)
+            db.start_add_attempt(HASH1, 3, 10)
+            db.record_missing_observation(HASH1, "previous 404")
             db.close()
 
-            db_only = {"hash": HASH1, "stat": 5, "stat_string": "Torrent in db"}
+            incomplete = {"hash": HASH1, "stat": 1, "stat_string": "Torrent getting info"}
+            clock = FakeClock()
             with (
                 mock.patch.object(importer, "fetch_history", return_value=[grab]),
-                mock.patch.object(importer, "fetch_torrserver", return_value=[db_only]),
-                mock.patch.object(importer, "fetch_media", return_value={"imdbId": "tt123"}),
+                mock.patch.object(importer, "fetch_torrserver_item", return_value=incomplete) as get_mock,
                 mock.patch.object(importer, "add_to_torrserver") as add_mock,
-                mock.patch.object(importer, "pending_deadline", wraps=importer.pending_deadline),
+                mock.patch.object(importer.time, "monotonic", side_effect=clock.monotonic),
+                mock.patch.object(importer.time, "sleep", side_effect=clock.sleep),
             ):
-                rc = importer.run(cfg)
-
-            self.assertEqual(rc, 1)
+                self.assertEqual(importer.run(cfg), 0)
+            self.assertGreater(get_mock.call_count, 1)
             add_mock.assert_not_called()
             db = importer.StateDB(cfg.state_db)
-            self.assertEqual(db.pending_rows()[0]["status"], "retry_wait")
-            self.assertNotIn(HASH1, db.all_hashes())
+            self.assertEqual(db.pending_rows()[0]["missing_observations"], 0)
             db.close()
-
-    def test_due_retry_with_present_live_hash_does_not_send_duplicate_add(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg = make_config(Path(tmp))
-            grab = make_grab()
-            db = importer.StateDB(cfg.state_db)
-            db.begin_pending(grab, cfg.name, {"imdbId": "tt123"}, cfg.verification_timeout_sec)
-            db.conn.execute(
-                "UPDATE pending_adds SET status='retry_wait', attempt_count=1, next_retry_at=? WHERE hash=?",
-                (
-                    (importer.datetime.now(importer.timezone.utc) - importer.timedelta(seconds=1)).isoformat(),
-                    HASH1,
-                ),
-            )
-            db.conn.commit()
-            db.close()
-
-            live_incomplete = {
-                "hash": HASH1, "stat": 2, "stat_string": "Torrent working",
-            }
-            with (
-                mock.patch.object(importer, "fetch_history", return_value=[grab]),
-                mock.patch.object(
-                    importer, "fetch_torrserver",
-                    side_effect=[[live_incomplete], [ready_record(HASH1)]],
-                ),
-                mock.patch.object(importer, "fetch_media", return_value={"imdbId": "tt123"}),
-                mock.patch.object(importer, "fetch_torrserver_item", return_value=live_incomplete),
-                mock.patch.object(importer, "add_to_torrserver") as add_mock,
-            ):
-                rc = importer.run(cfg)
-
-            self.assertEqual(rc, 0)
-            add_mock.assert_not_called()
-            db = importer.StateDB(cfg.state_db)
-            self.assertEqual(db.all_hashes(), {HASH1})
-            self.assertEqual(db.pending_rows(), [])
-            db.close()
-
-    def test_due_retry_with_absent_hash_submits_another_add(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg = make_config(Path(tmp))
-            grab = make_grab()
-            db = importer.StateDB(cfg.state_db)
-            db.begin_pending(grab, cfg.name, {"imdbId": "tt123"}, cfg.verification_timeout_sec)
-            db.conn.execute(
-                "UPDATE pending_adds SET status='retry_wait', attempt_count=1, next_retry_at=? WHERE hash=?",
-                (
-                    (importer.datetime.now(importer.timezone.utc) - importer.timedelta(seconds=1)).isoformat(),
-                    HASH1,
-                ),
-            )
-            db.conn.commit()
-            db.close()
-
-            with (
-                mock.patch.object(importer, "fetch_history", return_value=[grab]),
-                mock.patch.object(
-                    importer, "fetch_torrserver",
-                    side_effect=[[], [ready_record(HASH1)]],
-                ),
-                mock.patch.object(importer, "fetch_media", return_value={"imdbId": "tt123"}),
-                mock.patch.object(
-                    importer, "add_to_torrserver",
-                    return_value={"hash": HASH1, "stat_string": "Torrent added"},
-                ) as add_mock,
-            ):
-                rc = importer.run(cfg)
-
-            self.assertEqual(rc, 0)
-            add_mock.assert_called_once()
-            db = importer.StateDB(cfg.state_db)
-            self.assertEqual(db.all_hashes(), {HASH1})
-            self.assertEqual(db.pending_rows(), [])
-            db.close()
-
-    def test_action_get_404_does_not_count_as_success_or_resend_add(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg = make_config(Path(tmp))
-            cfg = importer.replace(
-                cfg, verification_timeout_sec=10, verification_poll_interval_sec=0.2,
-            )
-            grab = make_grab()
-            live_incomplete = {
-                "hash": HASH1, "stat": 1, "stat_string": "Torrent getting info",
-            }
-            with (
-                mock.patch.object(importer, "fetch_history", return_value=[grab]),
-                mock.patch.object(
-                    importer, "fetch_torrserver",
-                    side_effect=[[live_incomplete], []],
-                ),
-                mock.patch.object(importer, "fetch_media", return_value={"imdbId": "tt123"}),
-                mock.patch.object(
-                    importer, "fetch_torrserver_item",
-                    side_effect=importer.HttpStatusError(
-                        404, "POST", "http://127.0.0.1:8092/torrents", "not found",
-                    ),
-                ),
-                mock.patch.object(
-                    importer, "pending_deadline",
-                    return_value=importer.datetime.now(importer.timezone.utc) - importer.timedelta(seconds=1),
-                ),
-                mock.patch.object(importer, "add_to_torrserver") as add_mock,
-            ):
-                rc = importer.run(cfg)
-
-            self.assertEqual(rc, 1)
-            add_mock.assert_not_called()
-            db = importer.StateDB(cfg.state_db)
-            self.assertNotIn(HASH1, db.all_hashes())
-            self.assertEqual(db.pending_rows()[0]["status"], "retry_wait")
-            db.close()
-
-    def test_restart_reconciles_pending_hash_without_resending_add(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg = make_config(Path(tmp))
-            grab = make_grab()
-            db = importer.StateDB(cfg.state_db)
-            db.begin_pending(grab, cfg.name, {"imdbId": "tt123"}, 120)
-            db.close()
-
-            with (
-                mock.patch.object(importer, "fetch_history", return_value=[grab]),
-                mock.patch.object(importer, "fetch_torrserver", return_value=[{"hash": HASH1, "stat": 0, "stat_string": "Torrent added"}]),
-                mock.patch.object(importer, "fetch_torrserver_item", return_value=ready_record(HASH1)),
-                mock.patch.object(importer, "fetch_media", return_value={"imdbId": "tt123"}),
-                mock.patch.object(importer, "add_to_torrserver") as add_mock,
-            ):
-                rc = importer.run(cfg)
-
-            self.assertEqual(rc, 0)
-            add_mock.assert_not_called()
-            db = importer.StateDB(cfg.state_db)
-            self.assertIn(HASH1, db.all_hashes())
-            self.assertEqual(db.pending_rows(), [])
-            db.close()
-
-
-    def test_terminal_failure_is_not_confirmed_if_hash_lacks_file_stats(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg = make_config(Path(tmp))
-            grab = make_grab(HASH1, 454, "Viking Quest")
-            db = importer.StateDB(cfg.state_db)
-            db.begin_pending(grab, cfg.name, {"title": "Viking Quest"}, 120)
-            db.conn.execute(
-                """UPDATE pending_adds SET status='failed', attempt_count=3,
-                   radarr_blocklist_status='legacy_skipped' WHERE hash=?""",
-                (HASH1,),
-            )
-            db.conn.commit()
-            db.close()
-
-            listed_but_not_ready = {"hash": HASH1, "stat": 0, "stat_string": "Torrent added"}
-            with (
-                mock.patch.object(importer, "fetch_history", return_value=[grab]),
-                mock.patch.object(importer, "fetch_torrserver", return_value=[listed_but_not_ready]),
-                mock.patch.object(importer, "fetch_media") as media_mock,
-                mock.patch.object(importer, "add_to_torrserver") as add_mock,
-            ):
-                rc = importer.run(cfg)
-
-            self.assertEqual(rc, 0)
-            media_mock.assert_not_called()
-            add_mock.assert_not_called()
-            db = importer.StateDB(cfg.state_db)
-            self.assertNotIn(HASH1, db.all_hashes())
-            self.assertEqual(len(db.pending_rows(cfg.name)), 1)
-            self.assertEqual(db.pending_rows(cfg.name)[0]["status"], "failed")
-            db.close()
-
-    def test_stale_pending_row_is_deleted_when_hash_is_already_in_import_history(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg = make_config(Path(tmp))
-            grab = make_grab()
-            db = importer.StateDB(cfg.state_db)
-            db.begin_pending(grab, cfg.name, {"imdbId": "tt123"}, 120)
-            # Simulate a legacy/inconsistent state where a verified import and an
-            # unresolved pending row coexist for the same hash.
-            db.add(grab, cfg.name, {"imdbId": "tt123"})
-            self.assertEqual(len(db.pending_rows(cfg.name)), 1)
-            db.close()
-
-            with (
-                mock.patch.object(importer, "fetch_history", return_value=[grab]),
-                mock.patch.object(importer, "fetch_torrserver", return_value=[]),
-                mock.patch.object(importer, "fetch_media") as media_mock,
-                mock.patch.object(importer, "add_to_torrserver") as add_mock,
-            ):
-                rc = importer.run(cfg)
-
-            self.assertEqual(rc, 0)
-            media_mock.assert_not_called()
-            add_mock.assert_not_called()
-            db = importer.StateDB(cfg.state_db)
-            self.assertIn(HASH1, db.all_hashes())
-            self.assertEqual(db.pending_rows(cfg.name), [])
-            db.close()
-
-    def test_newer_radarr_grab_rearms_old_terminal_failure_for_same_hash(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg = make_config(Path(tmp))
-            old_grab = make_grab(HASH1, 454, "Old Viking Quest Grab")
-            new_grab = make_grab(HASH1, 475, "Viking Quest New Grab")
-            db = importer.StateDB(cfg.state_db)
-            db.begin_pending(old_grab, cfg.name, {"title": "Viking Quest"}, 120)
-            db.conn.execute(
-                """UPDATE pending_adds SET status='failed', attempt_count=3,
-                   radarr_blocklist_status='legacy_skipped',
-                   last_error='old terminal failure' WHERE hash=?""",
-                (HASH1,),
-            )
-            db.conn.commit()
-            db.close()
-
-            with (
-                mock.patch.object(importer, "fetch_history", return_value=[new_grab]),
-                mock.patch.object(importer, "fetch_torrserver", return_value=[]),
-                mock.patch.object(
-                    importer, "fetch_media",
-                    return_value={"title": "Viking Quest", "titleSlug": "viking-quest-2014", "tmdbId": 1234},
-                ),
-                mock.patch.object(
-                    importer, "add_to_torrserver",
-                    side_effect=importer.HttpStatusError(
-                        400, "POST", "http://127.0.0.1:8092/torrents", "simulated permanent response",
-                    ),
-                ) as add_mock,
-            ):
-                rc = importer.run(cfg)
-
-            # The simulated permanent API error ends this unit test quickly, after
-            # asserting the fresh Grab was submitted exactly once.
-            self.assertEqual(rc, 1)
-            add_mock.assert_called_once()
-            self.assertEqual(add_mock.call_args.args[2].history_id, 475)
-            db = importer.StateDB(cfg.state_db)
-            row = db.pending_rows(cfg.name)[0]
-            self.assertEqual(row["arr_history_id"], 475)
-            self.assertEqual(row["title"], "Viking Quest New Grab")
-            self.assertEqual(row["attempt_count"], 1)
-            self.assertEqual(row["status"], "failed")
-            self.assertNotEqual(row["radarr_blocklist_status"], "legacy_skipped")
-            db.close()
-
-    def test_acknowledged_or_uncertain_add_timeout_never_becomes_import_success(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg = make_config(Path(tmp))
-            grab = make_grab()
-
-            with (
-                mock.patch.object(importer, "fetch_history", return_value=[grab]),
-                mock.patch.object(importer, "fetch_torrserver", side_effect=[[], []]),
-                mock.patch.object(importer, "fetch_media", return_value={"imdbId": "tt123"}),
-                mock.patch.object(
-                    importer, "add_to_torrserver",
-                    side_effect=importer.ImporterError("simulated uncertain add response"),
-                ),
-                mock.patch.object(
-                    importer, "pending_deadline",
-                    return_value=importer.datetime.now(importer.timezone.utc) - importer.timedelta(seconds=1),
-                ),
-            ):
-                rc = importer.run(cfg)
-
-            self.assertEqual(rc, 1)
-            db = importer.StateDB(cfg.state_db)
-            self.assertNotIn(HASH1, db.all_hashes())
-            pending = db.pending_rows()
-            self.assertEqual(len(pending), 1)
-            self.assertEqual(pending[0]["status"], "retry_wait")
-            self.assertIn("simulated uncertain add response", pending[0]["last_error"])
-            db.close()
-
-
-
-
-class StateMigrationTests(unittest.TestCase):
     def test_concurrent_initializers_serialize_schema_migrations(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "state.db"
@@ -658,6 +793,7 @@ class StateMigrationTests(unittest.TestCase):
             self.assertIn("seerr_watchlist_status", initialized_columns[0])
             self.assertIn("seerr_watchlist_warning_notified_at", initialized_columns[0])
             self.assertIn("metadata_activation_attempt", initialized_columns[0])
+            self.assertIn("missing_observations", initialized_columns[0])
             self.assertEqual(initialized_columns[0], initialized_columns[1])
 
     def test_v11_database_migrates_in_place_and_baselines_old_failed_rows(self):
@@ -723,6 +859,9 @@ class StateMigrationTests(unittest.TestCase):
                 item["name"] for item in db.conn.execute("PRAGMA table_info(pending_adds)")
             })
             self.assertIn("metadata_activation_attempt", {
+                item["name"] for item in db.conn.execute("PRAGMA table_info(pending_adds)")
+            })
+            self.assertIn("missing_observations", {
                 item["name"] for item in db.conn.execute("PRAGMA table_info(pending_adds)")
             })
             self.assertEqual(db.unnotified_terminal_failures("radarr-1080"), [])

@@ -16,8 +16,8 @@ lock_file = ""
 retry_count = 2
 retry_delay = 1.0
 resolve_download_url = true
-verification_timeout_sec = 120
-verification_poll_interval_sec = 3.0
+verification_timeout_sec = 120 # Maximum in-run wait per queued hash; each hash has its own deadline.
+verification_poll_interval_sec = 3.0 # Shared carousel interval for unresolved exact-hash action=get checks.
 retry_backoff_sec = 60
 max_add_attempts = 3
 sonarr_blocklist_enabled = true # Send terminal TorrServer add/verification failures through Sonarr's native failed-history/blocklist path.
