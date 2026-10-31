@@ -14,7 +14,8 @@
 - **Sonarr live run:** summary submitted=0, added=0, failed=0, pending=22; duration=5.31 s.
 - **Final production database:** `PRAGMA integrity_check` returned `ok`; imports=729; pending_adds=22 (Radarr failed=7, Sonarr failed=15); the Groundhog Day hash is present once in `imports` and absent from `pending_adds`.
 - Detailed dry-run counters, re-arm audit, trace paths and service-state caveats are recorded in [the MINI-Ubuntu production validation report](docs/VALIDATION-v1.4.1-MINI-Ubuntu-2026-10-31.md) and [ROADMAP.md](ROADMAP.md).
-- **Still outstanding:** controlled CPU/request-count comparisons across idle, pending, small-batch and larger-library workloads, and an executable A/B comparison against v1.3.5. Timer reactivation is a separate operator step and is not claimed until systemd confirms it.
+- **Systemd scheduling:** the Radarr and Sonarr 1080p timers were re-enabled after manual validation and confirmed `enabled` and `active (waiting)` on 2026-10-31 at 22:04:09 +05:00. Both reported next trigger 22:09:09 +05:00; the timer listing contained exactly these two instances. The 4K timers were not touched.
+- **Still outstanding:** controlled CPU/request-count comparisons across idle, pending, small-batch and larger-library workloads, and an executable A/B comparison against v1.3.5.
 - **Publication:** validation is successful, but PR #6 remains draft; no v1.4.1 tag or GitHub Release has been published.
 
 ## torr-arr-importer v1.4.0 — candidate, not deployed
