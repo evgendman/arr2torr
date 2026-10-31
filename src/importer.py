@@ -751,6 +751,19 @@ class StateDB:
             self.conn.rollback()
             raise
 
+    def release_unsubmitted_claim(self, torrent_hash: str) -> bool:
+        """Release only a fresh reservation when preparation failed before any add."""
+        with self.conn:
+            cur = self.conn.execute(
+                """
+                DELETE FROM pending_adds
+                WHERE hash=? AND status='pending' AND attempt_count=0
+                  AND last_status='candidate-claimed'
+                """,
+                (torrent_hash,),
+            )
+        return cur.rowcount == 1
+
     def start_add_attempt(
         self, torrent_hash: str, max_attempts: int, verification_timeout_sec: int,
     ) -> int:
@@ -2706,15 +2719,24 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                 cfg.name, h, detail_status, problem,
             )
 
-        # New Arr hashes not already covered by imports/pending state are checked
-        # individually. A ready object is adopted into shared verified history so
-        # later idle runs do not query TorrServer for it again.
+        # New Arr hashes not already covered by imports/pending state are
+        # atomically claimed before the first TorrServer read. Other Arr instances
+        # therefore skip the hash instead of issuing duplicate get requests.
         pending_map = {row["hash"]: row for row in db.pending_rows()}
         for grab in grabs:
             h = grab.hash.lower()
             if h in pending_map:
                 continue
             if not rebuild and h in imported_hashes:
+                continue
+            if not db.claim_pending(
+                grab, cfg.name, {}, cfg.verification_timeout_sec,
+                allow_known=rebuild,
+            ):
+                logging.info(
+                    "GET_SKIPPED source=%s hash=%s reason=shared-pending-or-import-claim",
+                    cfg.name, h,
+                )
                 continue
 
             try:
@@ -2729,17 +2751,10 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
 
                 prepared = prepare_add(grab)
                 if prepared is None:
+                    db.release_unsubmitted_claim(h)
                     continue
                 media, resolved_link = prepared
-                if not db.claim_pending(
-                    grab, cfg.name, media, cfg.verification_timeout_sec,
-                    allow_known=rebuild,
-                ):
-                    logging.info(
-                        "ADD_SKIPPED source=%s hash=%s reason=shared-pending-or-import-claim",
-                        cfg.name, h,
-                    )
-                    continue
+                db.update_pending_media(h, media)
                 submit_add(grab, media, resolved_link)
                 continue
             except Exception as exc:
@@ -2747,13 +2762,16 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                     "TORRSERVER_GET_FAILED source=%s hash=%s error=%s",
                     cfg.name, h, exc,
                 )
+                # Keep the atomic claim. The owning instance will retry this
+                # read on its next timer run; no add has been counted or sent.
                 continue
 
             evidence = verification_evidence(details)
             if evidence:
-                if h not in imported_hashes:
-                    db.add(grab, cfg.name, {})
+                completed = db.confirm_pending(h)
+                if completed is not None:
                     imported_hashes.add(h)
+                    added += 1
                 skipped_present += 1
                 logging.info(
                     "SKIPPED_PRESENT source=%s hash=%s verification=%s recorded=true",
@@ -2769,25 +2787,17 @@ def run(cfg: Config, rebuild: bool = False, dry_run: bool = False, retry_failed:
                     "PENDING_METADATA_LOOKUP_FAILED source=%s hash=%s error=%s",
                     cfg.name, h, exc,
                 )
-            if db.claim_pending(
-                grab, cfg.name, media, cfg.verification_timeout_sec,
-                allow_known=rebuild,
-            ):
-                db.observe_pending(
-                    h, "action-get-incomplete: " + torrserver_status(details)
-                    + "; " + str(file_stats_problem(details)),
-                )
-                present_incomplete += 1
-                logging.info(
-                    "PENDING_EXISTING source=%s hash=%s status=%s "
-                    "reason=await-file-stats-on-next-run",
-                    cfg.name, h, torrserver_status(details),
-                )
-            else:
-                logging.info(
-                    "PENDING_SKIPPED source=%s hash=%s reason=shared-pending-or-import-claim",
-                    cfg.name, h,
-                )
+            db.update_pending_media(h, media)
+            db.observe_pending(
+                h, "action-get-incomplete: " + torrserver_status(details)
+                + "; " + str(file_stats_problem(details)),
+            )
+            present_incomplete += 1
+            logging.info(
+                "PENDING_EXISTING source=%s hash=%s status=%s "
+                "reason=await-file-stats-on-next-run",
+                cfg.name, h, torrserver_status(details),
+            )
 
         pending_count = len(db.pending_rows())
         known_count = sum(1 for grab in grabs if grab.hash in imported_hashes)
