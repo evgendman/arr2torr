@@ -28,7 +28,7 @@ from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 
-VERSION = "1.3.5"
+VERSION = "1.4.0"
 DEFAULT_PAGE_SIZE = 1000
 DEFAULT_TIMEOUT = 30
 
@@ -373,6 +373,7 @@ class StateDB:
                 last_checked_at TEXT,
                 last_status TEXT,
                 metadata_activation_attempt INTEGER,
+                missing_observations INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT,
                 next_retry_at TEXT,
                 notification_attempted_at TEXT,
@@ -443,6 +444,7 @@ class StateDB:
             "media_title": "TEXT",
             "title_slug": "TEXT",
             "metadata_activation_attempt": "INTEGER",
+            "missing_observations": "INTEGER NOT NULL DEFAULT 0",
             "notification_attempted_at": "TEXT",
             "notification_attempt_count": "INTEGER NOT NULL DEFAULT 0",
             "notification_next_retry_at": "TEXT",
@@ -846,7 +848,8 @@ class StateDB:
             self.conn.execute(
                 """
                 UPDATE pending_adds
-                SET last_checked_at = ?, last_status = ?, last_error = COALESCE(?, last_error)
+                SET last_checked_at = ?, last_status = ?, last_error = COALESCE(?, last_error),
+                    missing_observations = 0
                 WHERE hash = ? AND status = 'pending'
                 """,
                 (iso_now(), observed_status[:200], error[:1000] if error else None, torrent_hash),
@@ -2349,7 +2352,7 @@ def add_to_torrserver(cfg: Config, ts: HttpClient, grab: Grab, media: dict[str, 
         "save_to_db": True,
     }
     url = normalize_url(cfg.torrserver_url, "/torrents")
-    response = ts.request_json("POST", url, payload=payload, retry_count=cfg.retry_count, retry_delay=cfg.retry_delay)
+    response = ts.request_json("POST", url, payload=payload, retry_count=0)
     if not isinstance(response, dict):
         raise ImporterError(f"TorrServer add returned unexpected response for hash={grab.hash}")
     response_hash = str(response.get("hash") or "").strip().lower()
